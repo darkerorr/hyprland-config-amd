@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.0.8"
+readonly INSTALLER_VERSION="1.0.9"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -1038,8 +1038,8 @@ check_aur_dependencies() {
     fi
   done < <(awk -F' = ' '/^[[:space:]]*(depends|makedepends|checkdepends)(_[[:alnum:]_]+)? = /{print $2}' "$srcinfo")
   if (("${#aur_missing[@]}" > 0 || "${#unresolved[@]}" > 0)); then
-    (("${#aur_missing[@]}")) && printf '  - %s\\n' "${aur_missing[@]}" >&3
-    (("${#unresolved[@]}")) && printf '  - %s\\n' "${unresolved[@]}" >&3
+    (("${#aur_missing[@]}")) && printf '  - %s\n' "${aur_missing[@]}" >&3
+    (("${#unresolved[@]}")) && printf '  - %s\n' "${unresolved[@]}" >&3
     warn "$base : dépendances non résolues avant compilation."
     return 1
   fi
