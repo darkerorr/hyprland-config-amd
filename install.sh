@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.2.5"
+readonly INSTALLER_VERSION="1.2.6"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -1111,7 +1111,7 @@ dependency_version_satisfied() {
 # Les dépendances de dépôts seront résolues par makepkg ; une dépendance AUR
 # absente ou non épinglée est signalée explicitement au lieu d'un échec opaque.
 check_aur_dependencies() {
-  local dir=$1 base=$2 line dep pkg
+  local dir=$1 base=$2 line dep pkg installed_version repo_info repo_version
   local srcinfo="$dir/.SRCINFO"
   local -a unresolved=() aur_missing=() pinned_missing=()
   if ! (cd "$dir" && makepkg --printsrcinfo) >"$srcinfo"; then
@@ -1125,35 +1125,37 @@ check_aur_dependencies() {
     if [[ $pkg == otf-space-grotesk ]] && fc-match -f '%{family}\n' "Space Grotesk" | grep -qiF "Space Grotesk"; then
       continue
     elif is_pinned "$pkg"; then
-      local installed_version=""
-      pkg_installed "$pkg" && installed_version=$(pkg_version "$pkg")
+      installed_version=""
+      if pkg_installed "$pkg"; then installed_version=$(pkg_version "$pkg" || true); fi
       if [[ -n $installed_version ]] && dependency_version_satisfied "$dep" "$installed_version"; then
         continue
       fi
       pinned_missing+=("$dep (paquet Hyprland épinglé absent ou version installée incompatible)")
     elif aur_provided "$pkg"; then
-      local installed_version=""
-      pkg_installed "$pkg" && installed_version=$(pkg_version "$pkg")
+      installed_version=""
+      if pkg_installed "$pkg"; then installed_version=$(pkg_version "$pkg" || true); fi
       if [[ -n $installed_version ]] && dependency_version_satisfied "$dep" "$installed_version"; then
         continue
       fi
       aur_missing+=("$dep (dépendance AUR épinglée absente ou version installée incompatible)")
     elif pacman -T "$dep" >/dev/null 2>&1; then
       continue
-    elif ! pacman -Si "$pkg" >/dev/null 2>&1; then
-      unresolved+=("$dep")
     else
-      local repo_version
-      repo_version=$(LC_ALL=C pacman -Si "$pkg" | awk -F': ' '/^Version[[:space:]]*:/ {print $2; exit}')
-      if [[ -n $repo_version ]] && ! dependency_version_satisfied "$dep" "$repo_version"; then
-        unresolved+=("$dep (version dépôt $repo_version insuffisante)")
+      repo_info=""
+      if ! repo_info=$(LC_ALL=C pacman -Si "$pkg" 2>/dev/null); then
+        unresolved+=("$dep")
+      else
+        repo_version=$(awk -F': ' '/^Version[[:space:]]*:/ {print $2; exit}' <<<"$repo_info")
+        if [[ -n $repo_version ]] && ! dependency_version_satisfied "$dep" "$repo_version"; then
+          unresolved+=("$dep (version dépôt $repo_version insuffisante)")
+        fi
       fi
     fi
   done < <(awk -F' = ' '/^[[:space:]]*(depends|makedepends|checkdepends)(_[[:alnum:]_]+)? = /{print $2}' "$srcinfo")
-  if (("${#aur_missing[@]}" > 0 || "${#pinned_missing[@]}" > 0 || "${#unresolved[@]}" > 0)); then
-    (("${#aur_missing[@]}")) && printf '  - %s\n' "${aur_missing[@]}" >&3
-    (("${#pinned_missing[@]}")) && printf '  - %s\n' "${pinned_missing[@]}" >&3
-    (("${#unresolved[@]}")) && printf '  - %s\n' "${unresolved[@]}" >&3
+  if (( ${#aur_missing[@]} > 0 || ${#pinned_missing[@]} > 0 || ${#unresolved[@]} > 0 )); then
+    (( ${#aur_missing[@]} )) && printf '  - %s\n' "${aur_missing[@]}" >&3
+    (( ${#pinned_missing[@]} )) && printf '  - %s\n' "${pinned_missing[@]}" >&3
+    (( ${#unresolved[@]} )) && printf '  - %s\n' "${unresolved[@]}" >&3
     warn "$base : dépendances non résolues avant compilation."
     return 1
   fi
