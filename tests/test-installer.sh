@@ -41,6 +41,9 @@ pacman() {
         dependent-compatible)
           printf 'Name : dependent-compatible\nDepends On : hyprland>=0.54.0\nRequired By : None\n'
           ;;
+        dependent-current-too-new)
+          printf 'Name : dependent-current-too-new\nDepends On : hyprland<0.55.0\nRequired By : None\n'
+          ;;
         *) return 1 ;;
       esac
       ;;
@@ -65,6 +68,8 @@ vercmp() {
     printf '%s' -1
   elif [[ $1 == 0.50.0-1 && $2 == 0.54.3 ]]; then
     printf '%s' -1
+  elif [[ $1 == 0.56.0-1 && $2 == 0.55.0 ]]; then
+    printf '%s' 1
   else
     printf '%s' 0
   fi
@@ -156,6 +161,14 @@ if package_requires_incompatible_pin dependent-compatible; then
   fail "compatible Hyprland constraint was incorrectly rejected"
 fi
 pass "compatible reverse dependency preserved"
+if ! (
+  pkg_installed() { [[ $1 == hyprland ]]; }
+  pkg_version() { printf '%s' '0.56.0-1'; }
+  package_requires_incompatible_pin dependent-current-too-new
+); then
+  fail "currently installed incompatible version was missed"
+fi
+pass "current installed version is checked before system upgrade"
 
 # A repair run must be allowed to reach the pinned-package restoration step.
 mkdir -p "$(dirname -- "$PINS_LOCK")"
