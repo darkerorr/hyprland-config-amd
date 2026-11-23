@@ -55,6 +55,8 @@ jobs:
           fi
           grep -q 'if \[\[ ! -s \$dest.sig \]\]' install.sh
           grep -q 'remove_installer_ignorepkg()' install.sh
+          grep -q 'remove_installer_ignorepkg' install.sh
+          grep -q 'ensure_ignorepkg' install.sh
           grep -q 'PINS_RESTORED' install.sh
           grep -q 'repair mode defers pin-lock validation' tests/test-installer.sh
 
@@ -67,5 +69,5 @@ jobs:
 
       - name: Safe CLI smoke tests
         run: |
-          test "$(./install.sh --version)" = "1.1.7"
+          test "$(./install.sh --version)" = "1.1.8"
           ./install.sh --help >/dev/null
