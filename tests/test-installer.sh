@@ -48,7 +48,7 @@ pacman() {
 fc-match() { printf 'Space Grotesk\n'; }
 aur_provided() { [[ ${1:-} == songrec ]]; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
-expected_pin_version() { printf '%s' '0.54.3-4'; }
+target_pin_version() { printf '%s' '0.54.3-4'; }
 vercmp() {
   if [[ $1 == 0.54.3-4 && $2 == 0.55.0 ]]; then
     printf '%s' -1
