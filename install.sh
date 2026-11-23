@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.0.6"
+readonly INSTALLER_VERSION="1.0.7"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -746,7 +746,7 @@ install_aur_packages() {
     if ((all_installed)) && [[ $MODE != repair ]]; then log "AUR $base déjà installé"; continue; fi
     dir="$BUILD_DIR/aur/$base"
     git_checkout_pinned "https://aur.archlinux.org/$base.git" "$dir" "$commit"
-    check_aur_dependencies "$dir" "$base"
+    check_aur_dependencies "$dir" "$base" || die "AUR $base : pré-vérification des dépendances échouée."
     if [[ $base == wlogout ]] && ! gpg --list-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F &>/dev/null; then
       gpg --keyserver hkps://keys.openpgp.org --recv-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F \
         || gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F \
@@ -1034,11 +1034,13 @@ check_aur_dependencies() {
       unresolved+=("$dep")
     fi
   done < <(awk -F' = ' '/^[[:space:]]*(depends|makedepends|checkdepends)(_[[:alnum:]_]+)? = /{print $2}' "$srcinfo")
-  (("${#aur_missing[@]}" == 0 && "${#unresolved[@]}" == 0)) || {
-    (("${#aur_missing[@]}")) && printf '  - %s\n' "${aur_missing[@]}" >&3
-    (("${#unresolved[@]}")) && printf '  - %s\n' "${unresolved[@]}" >&3
-    die "AUR $base : dépendances non résolues avant compilation. Voir les éléments listés ci-dessus."
-  }
+  if (("${#aur_missing[@]}" > 0 || "${#unresolved[@]}" > 0)); then
+    (("${#aur_missing[@]}")) && printf '  - %s\\n' "${aur_missing[@]}" >&3
+    (("${#unresolved[@]}")) && printf '  - %s\\n' "${unresolved[@]}" >&3
+    warn "$base : dépendances non résolues avant compilation."
+    return 1
+  fi
+  return 0
 }
 
 install_end4_metas() {
@@ -1047,6 +1049,13 @@ install_end4_metas() {
   for m in "${END4_METAS[@]}"; do
     dir="$END4_DIR/sdata/dist-arch/illogical-impulse-$m"
     [[ -f $dir/PKGBUILD ]] || die "Méta-paquet end-4 absent : $m"
+    if ! check_aur_dependencies "$dir" "illogical-impulse-$m"; then
+      if [[ $END4_OPTIONAL_METAS == *" $m "* ]]; then
+        warn "illogical-impulse-$m ignoré : dépendances indisponibles (méta-paquet facultatif)."
+        continue
+      fi
+      die "Méta-paquet end-4 obligatoire illogical-impulse-$m : dépendances indisponibles."
+    fi
     mapfile -t deps < <(pkgbuild_depends "$dir/PKGBUILD")
     repo=()
     for d in "${deps[@]}"; do
@@ -1069,7 +1078,6 @@ install_end4_metas() {
     if pkg_installed "illogical-impulse-$m" && [[ $MODE != repair ]]; then log "Méta illogical-impulse-$m déjà installé"; continue; fi
     bdir="$BUILD_DIR/meta/illogical-impulse-$m"
     rm -rf -- "${bdir:?}"; mkdir -p "$bdir"; cp -a "$dir/." "$bdir/"
-    check_aur_dependencies "$bdir" "illogical-impulse-$m"
     if ! (cd "$bdir" && spin "end-4 : illogical-impulse-$m" makepkg -Afs --noconfirm); then
       if [[ $END4_OPTIONAL_METAS == *" $m "* ]]; then warn "illogical-impulse-$m non compilé (fonction secondaire : rendu LaTeX du panneau IA)."; continue; fi
       die "Échec de compilation du méta-paquet end-4 $m"
