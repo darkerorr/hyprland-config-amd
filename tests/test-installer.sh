@@ -62,6 +62,8 @@ vercmp() {
     printf '%s' -1
   elif [[ $1 == 1.0-1 && $2 == 2.0 ]]; then
     printf '%s' -1
+  elif [[ $1 == 0.50.0-1 && $2 == 0.54.3 ]]; then
+    printf '%s' -1
   else
     printf '%s' 0
   fi
@@ -106,6 +108,18 @@ if check_aur_dependencies "$TEST_DIR/pkg" fixture 3>&1 >/dev/null 2>&1; then
   fail "unpinned Hyprland repository dependency was accepted"
 fi
 pass "unpinned Hyprland dependency is rejected"
+
+# Even an installed pinned package must satisfy the version constraint.
+pkg_installed() { [[ $1 == hyprland ]]; }
+pkg_version() { printf '%s' '0.50.0-1'; }
+cat >"$TEST_DIR/srcinfo" <<'SRC'
+pkgbase = fixture
+    depends = hyprland>=0.54.3
+SRC
+if check_aur_dependencies "$TEST_DIR/pkg" fixture 3>&1 >/dev/null 2>&1; then
+  fail "incompatible installed Hyprland version was accepted"
+fi
+pass "installed pinned package version is checked"
 
 # A dependency absent from configured repositories must be reported.
 cat >"$TEST_DIR/srcinfo" <<'SRC'
