@@ -1027,7 +1027,7 @@ check_aur_dependencies() {
     [[ -n $pkg ]] || continue
     pacman -T "$dep" >/dev/null 2>&1 && continue
     if aur_provided "$pkg"; then
-      pkg_installed "$pkg" || aur_missing+=("$dep (AUR épinglé, ordre de construction incorrect)")
+      aur_missing+=("$dep (dépendance AUR épinglée absente ou version installée incompatible)")
     elif ! pacman -Si "$pkg" >/dev/null 2>&1; then
       unresolved+=("$dep")
     fi
