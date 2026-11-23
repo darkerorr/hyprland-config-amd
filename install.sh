@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.1.7"
+readonly INSTALLER_VERSION="1.1.8"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -425,7 +425,7 @@ expected_pin_version() {
 
 # Garde-fou : aucune transaction ne doit remplacer la pile épinglée.
 assert_pins_intact() {
-  [[ $MODE == repair && ${PINS_RESTORED:-0} == 0 ]] && return 0
+  [[ ${PINS_RESTORED:-0} == 0 ]] && return 0
   [[ -f $PINS_LOCK ]] || return 0
   local n v e bad=0
   for n in "${PIN_ORDER[@]}"; do
@@ -745,21 +745,14 @@ remove_installer_ignorepkg() {
 
 
 install_system_packages() {
-  local preserve_pins=0
-  if [[ -f $PINS_LOCK ]]; then
-    # Une installation précédente a déjà fixé les versions : ne pas les faire dériver.
-    ensure_ignorepkg
-    preserve_pins=1
-  else
-    # Sur une première installation, mettre d'abord Arch à jour sans ignorer
-    # les paquets Hyprland ; les versions épinglées seront posées ensuite.
-    remove_installer_ignorepkg
-  fi
+  # Mettre tout le système à jour sans conserver d'anciens IgnorePkg gérés par
+  # l'installateur ; la pile Hyprland épinglée sera réinstallée à l'étape 05.
+  remove_installer_ignorepkg
   local -a keyring_pkgs=(archlinux-keyring)
   pkg_installed endeavouros-keyring && keyring_pkgs+=(endeavouros-keyring)
   spin "Mise à jour des trousseaux de clés" sudo pacman -Sy --needed --noconfirm "${keyring_pkgs[@]}"
   spin "Mise à jour complète du système (pacman -Syu)" sudo pacman -Syu --noconfirm
-  if ((!preserve_pins)); then ensure_ignorepkg; fi
+  ensure_ignorepkg
   assert_pins_intact
   # PulseAudio est remplacé par PipeWire (conflit avec pipewire-pulse).
   pkg_installed pulseaudio && remove_conflict pulseaudio pipewire-pulse
