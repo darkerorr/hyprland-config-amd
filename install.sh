@@ -1026,7 +1026,9 @@ check_aur_dependencies() {
     pkg=${dep%%[<>=]*}
     [[ -n $pkg ]] || continue
     pacman -T "$dep" >/dev/null 2>&1 && continue
-    if aur_provided "$pkg"; then
+    if [[ $pkg == otf-space-grotesk ]] && fc-match -f '%{family}\n' "Space Grotesk" | grep -qiF "Space Grotesk"; then
+      continue
+    elif aur_provided "$pkg"; then
       aur_missing+=("$dep (dépendance AUR épinglée absente ou version installée incompatible)")
     elif ! pacman -Si "$pkg" >/dev/null 2>&1; then
       unresolved+=("$dep")
@@ -1067,7 +1069,8 @@ install_end4_metas() {
     if pkg_installed "illogical-impulse-$m" && [[ $MODE != repair ]]; then log "Méta illogical-impulse-$m déjà installé"; continue; fi
     bdir="$BUILD_DIR/meta/illogical-impulse-$m"
     rm -rf -- "${bdir:?}"; mkdir -p "$bdir"; cp -a "$dir/." "$bdir/"
-    if ! (cd "$bdir" && spin "end-4 : illogical-impulse-$m" makepkg -Afs --noconfirm --needed); then
+    check_aur_dependencies "$bdir" "illogical-impulse-$m"
+    if ! (cd "$bdir" && spin "end-4 : illogical-impulse-$m" makepkg -Afs --noconfirm); then
       if [[ $END4_OPTIONAL_METAS == *" $m "* ]]; then warn "illogical-impulse-$m non compilé (fonction secondaire : rendu LaTeX du panneau IA)."; continue; fi
       die "Échec de compilation du méta-paquet end-4 $m"
     fi
@@ -1181,7 +1184,7 @@ build_quickshell() {
   grep -q "^_commit='$QS_COMMIT'" "$bdir/PKGBUILD" || die "PKGBUILD Quickshell end-4 inattendu (commit épinglé différent)"
   [[ $commit != "$QS_COMMIT" ]] && sed -i "s/^_commit=.*/_commit='$commit'/" "$bdir/PKGBUILD"
   [[ -n $url ]] && sed -i "s#^url=.*#url='${url%.git}'#" "$bdir/PKGBUILD"
-  (cd "$bdir" && spin "Compilation de Quickshell ${commit:0:12}" makepkg -Afs --noconfirm --needed)
+  (cd "$bdir" && spin "Compilation de Quickshell ${commit:0:12}" makepkg -Afs --noconfirm)
 }
 
 install_quickshell() {
