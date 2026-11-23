@@ -27,6 +27,14 @@ jobs:
       - name: ShellCheck
         run: shellcheck --severity=warning install.sh
 
+      - name: AUR HTML converter removal
+        run: |
+          if grep -nE '^[[:space:]]*"(html2markdown|38c3-styles)\\|' install.sh; then
+            echo "Unwanted HTML conversion AUR package remains in installer"
+            exit 1
+          fi
+          grep -q 'SPACE_GROTESK_SHA256=' install.sh
+
       - name: Dual-boot safety guard
         run: |
           if grep -nE '(^|[;&|[:space:]])(parted|fdisk|cfdisk|sfdisk|mkfs([.][[:alnum:]]+)?|wipefs|sgdisk|grub-install|grub-mkconfig|efibootmgr|bootctl)([[:space:]]|$)' install.sh; then
