@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.0.7"
+readonly INSTALLER_VERSION="1.0.8"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -1020,7 +1020,10 @@ check_aur_dependencies() {
   local dir=$1 base=$2 line dep pkg
   local srcinfo="$dir/.SRCINFO"
   local -a unresolved=() aur_missing=()
-  (cd "$dir" && makepkg --printsrcinfo) >"$srcinfo" || die "AUR $base : génération de .SRCINFO impossible."
+  if ! (cd "$dir" && makepkg --printsrcinfo) >"$srcinfo"; then
+    warn "$base : génération de .SRCINFO impossible."
+    return 1
+  fi
   while IFS= read -r line; do
     dep=${line#*=}; dep=${dep# }
     pkg=${dep%%[<>=]*}
@@ -1049,6 +1052,10 @@ install_end4_metas() {
   for m in "${END4_METAS[@]}"; do
     dir="$END4_DIR/sdata/dist-arch/illogical-impulse-$m"
     [[ -f $dir/PKGBUILD ]] || die "Méta-paquet end-4 absent : $m"
+    if pkg_installed "illogical-impulse-$m" && [[ $MODE != repair ]]; then
+      log "Méta illogical-impulse-$m déjà installé"
+      continue
+    fi
     if ! check_aur_dependencies "$dir" "illogical-impulse-$m"; then
       if [[ $END4_OPTIONAL_METAS == *" $m "* ]]; then
         warn "illogical-impulse-$m ignoré : dépendances indisponibles (méta-paquet facultatif)."
@@ -1075,7 +1082,6 @@ install_end4_metas() {
       repo+=("$d")
     done
     pac_install --asdeps "${repo[@]}"
-    if pkg_installed "illogical-impulse-$m" && [[ $MODE != repair ]]; then log "Méta illogical-impulse-$m déjà installé"; continue; fi
     bdir="$BUILD_DIR/meta/illogical-impulse-$m"
     rm -rf -- "${bdir:?}"; mkdir -p "$bdir"; cp -a "$dir/." "$bdir/"
     if ! (cd "$bdir" && spin "end-4 : illogical-impulse-$m" makepkg -Afs --noconfirm); then
