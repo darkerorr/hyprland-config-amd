@@ -1,4 +1,4 @@
-name: Installer static checks
+name: Installer checks
 
 on:
   push:
@@ -25,58 +25,42 @@ jobs:
         run: |
           bash -n install.sh
           bash -n tests/test-installer.sh
-      - name: Installer regression tests
-        run: bash tests/test-installer.sh
+          bash -n tests/e2e-simulation.sh
 
       - name: ShellCheck
-        run: shellcheck --severity=warning install.sh tests/test-installer.sh
+        run: shellcheck --severity=warning install.sh tests/test-installer.sh tests/e2e-simulation.sh
 
-      - name: AUR HTML converter removal
+      - name: Unit tests
+        run: bash tests/test-installer.sh
+
+      - name: End-to-end simulation (mocked system, failure injection, resume, diagnose, repair)
+        run: bash tests/e2e-simulation.sh
+
+      - name: Regression guards
         run: |
+          # .SRCINFO values must not be cut at the first "=" (cmake>=3.30 -> 3.30).
+          if grep -nF 'dep=${line#*=}' install.sh; then
+            echo "Versioned dependencies would be truncated"; exit 1
+          fi
+          # otf-space-grotesk must be provided by a real local package, not a font check.
+          grep -q 'provides=(otf-space-grotesk)' install.sh
           if grep -nE '^[[:space:]]*"(html2markdown|38c3-styles)[|]' install.sh; then
-            echo "Unwanted HTML conversion AUR package remains in installer"
-            exit 1
+            echo "Unwanted HTML conversion AUR package remains in installer"; exit 1
           fi
-          grep -q 'SPACE_GROTESK_SHA256=' install.sh
-          grep -q 'pkg == otf-space-grotesk' install.sh
-          grep -q 'fc-match.*Space Grotesk' install.sh
-          grep -q 'check_aur_dependencies "$dir" "$base"' install.sh
-          grep -q 'check_aur_dependencies "$dir" "illogical-impulse-$m"' install.sh
-          grep -q 'check_aur_dependencies "$qcheck" "illogical-impulse-quickshell-git"' install.sh
-          grep -q 'pacman -T "$dep"' install.sh
-          grep -q 'pinned_missing+=' install.sh
-          grep -q 'installed pinned package version is checked' tests/test-installer.sh
-          grep -q 'unpinned Hyprland dependency is rejected' tests/test-installer.sh
-          grep -q 'dependency_version_satisfied "$dep" "$repo_version"' install.sh
-          grep -q 'insufficient repository package version' tests/test-installer.sh
-          grep -q 'package_requires_incompatible_pin "$d"' install.sh
-          grep -q 'vercmp "$actual" "$required"' install.sh
-          grep -q 'target_pin_version "$n"' install.sh
-          grep -Fq "printf '%s\\n'" install.sh
-          grep -Fq "^[[:space:]]*(depends|makedepends|checkdepends)" install.sh
           if grep -nE 'makepkg .*--needed' install.sh; then
-            echo "--needed must only be used by makepkg with --install"
-            exit 1
+            echo "--needed must only be used by makepkg with --install"; exit 1
           fi
-          grep -q 'if \[\[ ! -s \$dest.sig \]\]' install.sh
-          grep -q 'remove_incompatible_dependents' install.sh
-          if grep -q 'illogical-impulse-.*||.*hyprshot.*continue' install.sh; then
-            echo "Reverse dependencies must be checked, not skipped by package name"
-            exit 1
-          fi
-          grep -q 'ensure_ignorepkg' install.sh
-          grep -q 'PINS_RESTORED' install.sh
-          grep -q 'repair mode defers pin-lock validation' tests/test-installer.sh
-          grep -q 'current installed version is checked before system upgrade' tests/test-installer.sh
+          # Checkpoints are only trusted after a real-state verification.
+          grep -q 'if step_verify "$idx"; then' install.sh
+          grep -q 'la vérification après exécution échoue' install.sh
 
       - name: Dual-boot safety guard
         run: |
-          if grep -nE '(^|[;&|[:space:]])(parted|fdisk|cfdisk|sfdisk|mkfs([.][[:alnum:]]+)?|wipefs|sgdisk|grub-install|grub-mkconfig|efibootmgr|bootctl)([[:space:]]|$)' install.sh; then
-            echo "Unexpected partition or bootloader command found in installer"
-            exit 1
+          if grep -nE '(^|[;&|[:space:]])(parted|fdisk|cfdisk|sfdisk|gdisk|mkfs([.][[:alnum:]]+)?|wipefs|sgdisk|grub-install|grub-mkconfig|efibootmgr|bootctl|os-prober|mkinitcpio|dracut)([[:space:]]|$)' install.sh; then
+            echo "Unexpected partition or bootloader command found in installer"; exit 1
           fi
 
       - name: Safe CLI smoke tests
         run: |
-          test "$(./install.sh --version)" = "1.2.9"
+          test "$(./install.sh --version)" = "2.0.0"
           ./install.sh --help >/dev/null

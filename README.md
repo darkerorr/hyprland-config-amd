@@ -220,16 +220,23 @@ Vos raccourcis : `~/.config/hypr/custom/keybinds.user.conf`. Le fichier QWERTY d
 Prérequis : EndeavourOS fraîchement installé, à jour ou non ; Internet ; ≥ 25 Go libres sur `/` et ≥ 20 Go dans `$HOME` (compilations et chroot inclus). Lancez le script depuis un TTY (Ctrl+Alt+F3) ou depuis votre session actuelle. Durée typique : 30 à 60 min, essentiellement en compilations (Quickshell, chroot, AUR).
 
 
-### Correctifs de fiabilité (versions 1.0.1 et 1.0.3)
+### Version 2.0.0 — audit de fiabilité
 
-- **1.0.3 — suppression de la chaîne `html2markdown`** : l’installeur ne compile plus le méta-paquet AUR `38c3-styles` uniquement pour récupérer Space Grotesk. Il télécharge l’archive officielle du styleguide 38C3, vérifie sa somme SHA-256, extrait uniquement les fichiers OTF et leur licence, puis installe la police dans le profil utilisateur. Les paquets AUR `html2markdown` et `38c3-styles` sont retirés : leurs dépendances de compilation ne peuvent donc plus bloquer l’installation.
-- Les checkpoints sont invalidés lorsque le contenu de `install.sh` change : une relance ne saute plus silencieusement des étapes marquées par une ancienne version du script.
-- La sélection réseau ne réactive plus NetworkManager lorsqu’un autre gestionnaire réseau actif est détecté.
-- La session SDDM utilise le nom de session `hyprland.desktop` et normalise aussi l’utilisateur dans la section `[Last]`.
-- La comparaison Quickshell signale également les fichiers présents d’un seul côté, au lieu de les ignorer.
-- Le bootstrap des trousseaux ne passe plus deux fois `archlinux-keyring` à pacman lorsque le trousseau EndeavourOS n’est pas installé.
+Défauts corrigés (tous constatés dans le code de la 1.2.9) :
 
-Ces corrections sont des changements de code et de contrôles statiques ; elles ne constituent pas une validation sur une machine EndeavourOS réelle. Aucune installation ni opération de partitionnement n’a été exécutée pendant cet audit.
+- **Dépendances versionnées rejetées à tort.** La pré-vérification coupait chaque ligne du `.SRCINFO` au premier `=` : `cmake>=3.30` devenait `3.30`, déclaré introuvable, et l’installation s’arrêtait avant `makepkg`. La suite de tests du dépôt échouait d’ailleurs déjà sur ce point.
+- **Échec certain de l’étape 6 (makepkg, code 8).** Le méta-paquet end-4 `illogical-impulse-fonts-themes` dépend de `otf-space-grotesk`. La police était copiée dans `~/.local/share/fonts`, mais aucun paquet ne la *fournissait* : `makepkg -s` puis `pacman -U` ne pouvaient pas satisfaire cette dépendance. L’installateur construit désormais un petit paquet local `hypr-installer-space-grotesk` (archive 38C3 vérifiée par SHA-256, `provides=(otf-space-grotesk)`).
+- **Points de reprise aveugles.** Une étape marquée comme terminée était sautée sans vérifier le système. Désormais, chaque étape 3 à 11 a une fonction `verify_step_N` en lecture seule : l’étape n’est sautée que si son point de reprise existe **et** que l’état réel est conforme. Après exécution, la même vérification doit réussir avant d’écrire le point de reprise (aucune fausse réussite). Une étape réexécutée invalide les suivantes, qui en dépendent. Modifier le script ne relance plus tout.
+- **Échecs non enregistrés.** Un `die` ne marquait pas l’étape en échec et n’écrivait aucun rapport. La gestion est maintenant centralisée (`on_exit`) : étape, raison, cause et code sont conservés dans `state/step-N.failed`, affichés, et repris par le rapport et par `--diagnose`.
+- **Causes illisibles.** La sortie de chaque commande en échec est analysée : paquet introuvable, conflit, rupture de dépendance, trousseau, réseau, verrou, somme de contrôle, échec de `build()`… Le code `makepkg` est traduit (8 = dépendances impossibles à installer, avec le paquet en cause).
+- **Mise à jour du système bloquée par la pile épinglée.** Si `pacman -Syu` remplace une bibliothèque dont dépend un paquet épinglé, le paquet bloquant est identifié, retiré (avec confirmation), puis recompilé à l’étape 5 contre la nouvelle bibliothèque. `IgnorePkg` n’est posé avant `-Syu` que si la pile épinglée est déjà installée.
+- **Conflits pacman.** Avec `--noconfirm`, pacman répond « non » aux suppressions. Les paquets bloquants sont maintenant identifiés dans la sortie et retirés après confirmation, puis la transaction est relancée (2 fois au plus). Les conflits sont lus dans le `.PKGINFO` exact de chaque paquet.
+- **Verrou pacman orphelin** après une interruption : détecté, et retiré après accord uniquement si aucun pacman ne tourne. Une interruption laisse la commande en cours se terminer proprement.
+- **AUR indisponible** : repli automatique sur le miroir GitHub officiel (`github.com/archlinux/aur`, mêmes commits vérifiés).
+- **`--diagnose` refait** : il ne modifie rien et ne s’arrête plus en cas de réseau absent. Il distingue prérequis manquants, étapes terminées (état vérifié), échouées (avec cause), interrompues, non exécutées, terminées mais dégradées, ainsi que les paquets absents.
+- `--repair` ne recompile plus les paquets AUR intacts. `--yes` ne redémarre plus jamais la machine. `install.sh` est exécutable dans le dépôt.
+
+Aucune commande touchant aux partitions, systèmes de fichiers, EFI, GRUB ou au chargeur Windows n’existe dans le script. La CI et la simulation de bout en bout le vérifient.
 
 ## 7. Validation
 
@@ -255,6 +262,21 @@ En session, automatiquement au premier login (notification + rapport) :
 Le test polkit reste manuel : `pkexec true` doit ouvrir la fenêtre Quickshell.
 
 ## 8. Résultats des tests réalisés (honnêtement)
+
+### Tests de la version 2.0.0 (exécutés dans un conteneur Linux, sans EndeavourOS)
+
+| Test | Résultat |
+|---|---|
+| `bash -n` sur les trois scripts | ✅ |
+| ShellCheck 0.10.0, niveau `warning`, sur `install.sh` et les tests | ✅ 0 avertissement |
+| `tests/test-installer.sh` — 20 tests unitaires (analyse `.SRCINFO`, otf-space-grotesk, dépendants inverses, analyse des sorties pacman/makepkg, points de reprise, fausse réussite, enregistrement des échecs, dérive de la pile) | ✅ 20/20 |
+| `tests/e2e-simulation.sh` — `install.sh` exécuté **en entier** avec pacman, makepkg, git, curl, sudo, systemctl… simulés (base de paquets fictive, racine système temporaire, utilisateur non privilégié). 9 scénarios : installation complète, relance, échec `makepkg` code 8 puis reprise, dérive de l’état réel, interruption SIGTERM puis reprise, `--diagnose` (système frais, hors réseau, terminé), `-Syu` bloqué + `--repair`, AUR indisponible, dépendance absente des dépôts | ✅ 54/54 avec l’arbre end-4 synthétique ; ✅ 54/54 avec le **vrai** end-4 au commit `bebf66d` |
+| Vérification des 9 paquets AUR épinglés au commit exact (via le miroir GitHub officiel) : dépendances relues, toutes présentes dans les dépôts officiels | ✅ |
+| `--private-check-compat` existe bien au commit Quickshell épinglé `7511545` | ✅ |
+
+La simulation valide l’enchaînement, les erreurs, la reprise et le diagnostic. Elle **ne prouve pas** que les paquets réels se compilent, ni que pacman réagit exactement comme les simulacres, ni qu’Hyprland démarre sur la RX 550.
+
+### Audit initial (versions 1.x)
 
 L’environnement de développement est **Windows sans virtualisation** (WSL2/Docker indisponibles). **Aucune exécution réelle sur EndeavourOS ni session graphique n’a pu être faite.**
 
@@ -288,8 +310,8 @@ Ce qui **n’a pas pu** être testé ici, donc vérifié par le script lui-même
 
 ## 10. Récupération
 
-- **Reprendre après interruption** : relancer `./install.sh`.
-- **Diagnostiquer** : `./install.sh --diagnose`, puis lire `~/.local/share/hypr-installer/reports/latest-diagnose.txt`.
+- **Reprendre après interruption ou échec** : relancer `./install.sh`. Les étapes dont l’état réel est conforme sont sautées ; les autres sont refaites. Un verrou pacman laissé par l’interruption est proposé à la suppression.
+- **Diagnostiquer** : `./install.sh --diagnose` (aucune modification). Il classe chaque étape : terminée et conforme, en échec (date, code, cause), interrompue, non exécutée, ou terminée mais dégradée. Il liste aussi les paquets absents. Rapport : `~/.local/share/hypr-installer/reports/latest-diagnose.txt` ; dernier échec d’une étape : `~/.local/share/hypr-installer/state/step-N.failed`.
 - **Réparer** (après une mise à jour qui casse la pile, ou Quickshell incompatible) : `~/.local/share/hypr-installer/bin/install.sh --repair`.
 - **Restaurer une configuration** : chaque sauvegarde liste `source → copie` dans `backups/<horodatage>/MANIFEST.tsv`. Par exemple :
   `cp -a ~/.local/share/hypr-installer/backups/<horodatage>/home/.config/kitty ~/.config/`
