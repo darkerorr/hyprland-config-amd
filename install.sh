@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.2.2"
+readonly INSTALLER_VERSION="1.2.3"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -1113,7 +1113,7 @@ dependency_version_satisfied() {
 check_aur_dependencies() {
   local dir=$1 base=$2 line dep pkg
   local srcinfo="$dir/.SRCINFO"
-  local -a unresolved=() aur_missing=()
+  local -a unresolved=() aur_missing=() pinned_missing=()
   if ! (cd "$dir" && makepkg --printsrcinfo) >"$srcinfo"; then
     warn "$base : génération de .SRCINFO impossible."
     return 1
@@ -1125,6 +1125,8 @@ check_aur_dependencies() {
     pacman -T "$dep" >/dev/null 2>&1 && continue
     if [[ $pkg == otf-space-grotesk ]] && fc-match -f '%{family}\n' "Space Grotesk" | grep -qiF "Space Grotesk"; then
       continue
+    elif is_pinned "$pkg"; then
+      pinned_missing+=("$dep (paquet Hyprland épinglé absent ou version installée incompatible)")
     elif aur_provided "$pkg"; then
       aur_missing+=("$dep (dépendance AUR épinglée absente ou version installée incompatible)")
     elif ! pacman -Si "$pkg" >/dev/null 2>&1; then
@@ -1137,8 +1139,9 @@ check_aur_dependencies() {
       fi
     fi
   done < <(awk -F' = ' '/^[[:space:]]*(depends|makedepends|checkdepends)(_[[:alnum:]_]+)? = /{print $2}' "$srcinfo")
-  if (("${#aur_missing[@]}" > 0 || "${#unresolved[@]}" > 0)); then
+  if (("${#aur_missing[@]}" > 0 || "${#pinned_missing[@]}" > 0 || "${#unresolved[@]}" > 0)); then
     (("${#aur_missing[@]}")) && printf '  - %s\n' "${aur_missing[@]}" >&3
+    (("${#pinned_missing[@]}")) && printf '  - %s\n' "${pinned_missing[@]}" >&3
     (("${#unresolved[@]}")) && printf '  - %s\n' "${unresolved[@]}" >&3
     warn "$base : dépendances non résolues avant compilation."
     return 1
