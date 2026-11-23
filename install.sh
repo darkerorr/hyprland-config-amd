@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.1.0"
+readonly INSTALLER_VERSION="1.1.1"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -936,7 +936,7 @@ remove_incompatible_dependents() {
       deps+=("$d")
     done
   done
-  mapfile -t deps < <(printf '%s\\n' "${deps[@]}" | sort -u | grep -v '^$' || true)
+  mapfile -t deps < <(printf '%s\n' "${deps[@]}" | sort -u | grep -v '^$' || true)
   (("${#deps[@]}")) || return 0
   for d in "${deps[@]}"; do
     case $d in
@@ -1113,7 +1113,7 @@ install_end4_metas() {
       # The installer deliberately provides that font directly from the
       # checksum-verified 38C3 archive instead of building 38c3-styles.
       if [[ $d == otf-space-grotesk ]]; then
-        if fc-match -f '%{family}\\n' "Space Grotesk" | grep -qiF "Space Grotesk"; then
+        if fc-match -f '%{family}\n' "Space Grotesk" | grep -qiF "Space Grotesk"; then
           log "Dépendance $d satisfaite par la police Space Grotesk installée localement"
           continue
         fi
