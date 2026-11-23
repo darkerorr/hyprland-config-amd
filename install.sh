@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.1.2"
+readonly INSTALLER_VERSION="1.1.3"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -416,6 +416,7 @@ expected_pin_version() {
 
 # Garde-fou : aucune transaction ne doit remplacer la pile épinglée.
 assert_pins_intact() {
+  [[ $MODE == repair && ${PINS_RESTORED:-0} == 0 ]] && return 0
   [[ -f $PINS_LOCK ]] || return 0
   local n v e bad=0
   for n in "${PIN_ORDER[@]}"; do
@@ -715,13 +716,41 @@ ensure_ignorepkg() {
   sudo install -m 644 "$tmp" /etc/pacman.conf
   ok "IgnorePkg ajouté à /etc/pacman.conf (sauvegarde : $BACKUP_DIR)"
 }
+remove_installer_ignorepkg() {
+  local marker="# hypr-installer: pile Hyprland 0.54.3 épinglée"
+  grep -qF "$marker" /etc/pacman.conf || return 0
+  backup_path /etc/pacman.conf
+  local tmp
+  tmp=$(mktemp "$TMP_DIR/pacman.conf.XXXXXX")
+  awk -v marker="$marker" '
+    $0 == marker { skip=1; next }
+    skip==1 {
+      skip=0
+      if ($0 ~ /^IgnorePkg[[:space:]]*=/) next
+    }
+    { print }
+  ' /etc/pacman.conf >"$tmp"
+  sudo install -m 644 "$tmp" /etc/pacman.conf
+  log "IgnorePkg temporaire de hypr-installer retiré avant la mise à jour complète."
+}
+
 
 install_system_packages() {
-  ensure_ignorepkg
+  local preserve_pins=0
+  if [[ -f $PINS_LOCK ]]; then
+    # Une installation précédente a déjà fixé les versions : ne pas les faire dériver.
+    ensure_ignorepkg
+    preserve_pins=1
+  else
+    # Sur une première installation, mettre d'abord Arch à jour sans ignorer
+    # les paquets Hyprland ; les versions épinglées seront posées ensuite.
+    remove_installer_ignorepkg
+  fi
   local -a keyring_pkgs=(archlinux-keyring)
   pkg_installed endeavouros-keyring && keyring_pkgs+=(endeavouros-keyring)
   spin "Mise à jour des trousseaux de clés" sudo pacman -Sy --needed --noconfirm "${keyring_pkgs[@]}"
   spin "Mise à jour complète du système (pacman -Syu)" sudo pacman -Syu --noconfirm
+  if ((!preserve_pins)); then ensure_ignorepkg; fi
   assert_pins_intact
   # PulseAudio est remplacé par PipeWire (conflit avec pipewire-pulse).
   pkg_installed pulseaudio && remove_conflict pulseaudio pipewire-pulse
@@ -987,6 +1016,7 @@ install_hyprland() {
   : >"$PINS_LOCK.tmp"
   for n in "${PIN_ORDER[@]}"; do printf '%s %s\n' "$n" "$(pkg_version "$n")" >>"$PINS_LOCK.tmp"; done
   mv -f "$PINS_LOCK.tmp" "$PINS_LOCK"
+  PINS_RESTORED=1
   for n in "${PIN_ORDER[@]}"; do
     local v; v=$(pkg_version "$n")
     [[ $v == "${PIN_VER[$n]}" || $v == "${PIN_VER[$n]}${LOCAL_REL_SUFFIX}" ]] || die "$n : version installée $v inattendue"
