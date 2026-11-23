@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.0.0"
+readonly INSTALLER_VERSION="1.0.1"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -348,7 +348,11 @@ on_exit() {
 }
 
 checkpoint_key() {
-  printf '%s|%s|%s|%s' "$INSTALLER_VERSION" "$END4_COMMIT" "$QS_COMMIT" "${PIN_VER[hyprland]}" | sha256sum | cut -c1-16
+  # Invalide les checkpoints dès que le script change.
+  local script_hash
+  script_hash=$(sha256sum "$SCRIPT_SELF" | awk '{print $1}')
+  printf '%s|%s|%s|%s' "$INSTALLER_VERSION" "$script_hash" "$END4_COMMIT" "$QS_COMMIT" \
+    | sha256sum | cut -c1-16
 }
 checkpoint_done() { [[ -f $STATE_DIR/step-$1.done && "$(<"$STATE_DIR/step-$1.done")" == "$(checkpoint_key)" ]]; }
 checkpoint_set()  { checkpoint_key >"$STATE_DIR/step-$1.done"; }
@@ -577,8 +581,8 @@ preflight() {
   local fs free
   for fs in / "$HOME"; do
     free=$(LC_ALL=C df -BG --output=avail "$fs" | tail -1 | tr -dc '0-9')
-    if [[ $fs == / ]] && ((free < 15)); then die "Espace insuffisant sur / : ${free} Go (15 Go requis)."; fi
-    if [[ $fs == "$HOME" ]] && ((free < 8)); then die "Espace insuffisant dans $HOME : ${free} Go (8 Go requis)."; fi
+    if [[ $fs == / ]] && ((free < 25)); then die "Espace insuffisant sur / : ${free} Go (25 Go requis pour les paquets et le chroot de compilation)."; fi
+    if [[ $fs == "$HOME" ]] && ((free < 20)); then die "Espace insuffisant dans $HOME : ${free} Go (20 Go requis pour les sources et caches de compilation)."; fi
   done
   ok "Espace disque suffisant"
   if [[ $IN_SESSION == Hyprland && -n $EXISTING_HYPR && $EXISTING_HYPR != "$(expected_pin_version hyprland)" ]]; then
@@ -714,8 +718,10 @@ ensure_ignorepkg() {
 
 install_system_packages() {
   ensure_ignorepkg
-  spin "Mise à jour des trousseaux de clés" sudo pacman -Sy --needed --noconfirm archlinux-keyring "$(pkg_installed endeavouros-keyring && echo endeavouros-keyring || echo archlinux-keyring)"
-  spin "Mise à jour complète du système (pacman -Su)" sudo pacman -Su --noconfirm
+  local -a keyring_pkgs=(archlinux-keyring)
+  pkg_installed endeavouros-keyring && keyring_pkgs+=(endeavouros-keyring)
+  spin "Mise à jour des trousseaux de clés" sudo pacman -Sy --needed --noconfirm "${keyring_pkgs[@]}"
+  spin "Mise à jour complète du système (pacman -Syu)" sudo pacman -Syu --noconfirm
   assert_pins_intact
   # PulseAudio est remplacé par PipeWire (conflit avec pipewire-pulse).
   pkg_installed pulseaudio && remove_conflict pulseaudio pipewire-pulse
@@ -1537,13 +1543,15 @@ configure_audio() {
 
 configure_network() {
   pac_install "${NET_PKGS[@]}"
-  if systemctl is-active --quiet NetworkManager; then ok "NetworkManager actif"
-  elif systemctl is-active --quiet systemd-networkd || systemctl is-active --quiet iwd; then
-    warn "Un autre gestionnaire réseau est actif (systemd-networkd/iwd) : NetworkManager non activé pour ne pas couper la connexion."
+  if systemctl is-active --quiet NetworkManager.service; then
+    sudo systemctl enable NetworkManager.service
+    ok "NetworkManager actif et activé au démarrage"
+  elif systemctl is-active --quiet systemd-networkd.service || systemctl is-active --quiet iwd.service; then
+    warn "Un autre gestionnaire réseau est actif (systemd-networkd/iwd) : NetworkManager reste désactivé pour préserver la connexion."
   else
-    sudo systemctl enable --now NetworkManager.service; ok "NetworkManager activé"
+    sudo systemctl enable --now NetworkManager.service
+    ok "NetworkManager activé et démarré"
   fi
-  sudo systemctl is-enabled --quiet NetworkManager.service || sudo systemctl enable NetworkManager.service
 }
 
 configure_bluetooth() {
@@ -1578,14 +1586,19 @@ configure_login_manager() {
       tmp=$(mktemp "$TMP_DIR/state.XXXXXX")
       # shellcheck disable=SC2024  # lecture d'un fichier root vers un fichier temporaire utilisateur (voulu)
       if sudo test -f "$st"; then sudo cat "$st" >"$tmp"; fi
-      if ! grep -q '^Session=/usr/share/wayland-sessions/hyprland.desktop$' "$tmp"; then
-        awk -v u="$USER" '
-          BEGIN{inlast=0; done=0}
-          /^\[Last\]/{print; print "Session=/usr/share/wayland-sessions/hyprland.desktop"; print "User=" u; inlast=1; done=1; next}
-          /^\[/{inlast=0}
-          inlast && /^(Session|User)=/{next}
-          {print}
-          END{if(!done){print "[Last]"; print "Session=/usr/share/wayland-sessions/hyprland.desktop"; print "User=" u}}' "$tmp" >"$tmp.new"
+      awk -v u="$USER" '
+        function flush_last() {
+          if (inlast && !session) print "Session=hyprland.desktop"
+          if (inlast && !user) print "User=" u
+        }
+        /^\[Last\]/ { flush_last(); print; inlast=1; found=1; session=0; user=0; next }
+        /^\[/ { flush_last(); inlast=0 }
+        inlast && /^Session=/ { if (!session) print "Session=hyprland.desktop"; session=1; next }
+        inlast && /^User=/ { if (!user) print "User=" u; user=1; next }
+        { print }
+        END { flush_last(); if (!found) { print "[Last]"; print "Session=hyprland.desktop"; print "User=" u } }
+      ' "$tmp" >"$tmp.new"
+      if ! sudo cmp -s "$tmp.new" "$st"; then
         sudo_write "$st" 644 <"$tmp.new"
         sudo chown sddm:sddm "$st" 2>/dev/null || true
       fi
@@ -1645,7 +1658,12 @@ validate_installation() {
   chk_if "Configuration hyprlang valide" 'grep -qi "config ok" <<<"$vout"' "Hyprland --verify-config" FAIL "$(grep -im1 -E 'error|erreur' <<<"$vout" || echo 'voir journal')"
   local rel; rel=$(cat "$CFG/illogical-impulse/hypr-installer-release" 2>/dev/null || true)
   chk_if "End-4 release correcte" '[[ $rel == "$END4_TAG $END4_COMMIT" && -f $CFG/quickshell/ii/shell.qml ]]' "$END4_TAG ${END4_COMMIT:0:12}"
-  local qdiff; qdiff=$(diff -rq "$END4_DIR/dots/.config/quickshell" "$CFG/quickshell" 2>/dev/null | grep -v '^Only in' | head -3 || true)
+  local qdiff=""
+  if [[ ! -d $END4_DIR/dots/.config/quickshell || ! -d $CFG/quickshell ]]; then
+    qdiff="répertoire source ou destination absent"
+  else
+    qdiff=$(diff -qr "$END4_DIR/dots/.config/quickshell" "$CFG/quickshell" 2>/dev/null | head -3 || true)
+  fi
   chk_if "Fichiers Quickshell identiques à la release" '[[ -z $qdiff ]]' "$CFG/quickshell" WARN "${qdiff:-}"
   local qsc; qsc=$(state_get quickshell.commit)
   chk_if "Quickshell installé" 'pkg_installed illogical-impulse-quickshell-git && command -v qs >/dev/null' "commit ${qsc:0:12}$([[ $qsc == "$QS_FALLBACK_COMMIT" ]] && echo ' (repli v0.3.0)')"
