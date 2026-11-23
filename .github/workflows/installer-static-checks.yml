@@ -44,6 +44,8 @@ jobs:
           grep -q 'check_aur_dependencies "$dir" "illogical-impulse-$m"' install.sh
           grep -q 'check_aur_dependencies "$qcheck" "illogical-impulse-quickshell-git"' install.sh
           grep -q 'pacman -T "$dep"' install.sh
+          grep -q 'pinned_missing+=' install.sh
+          grep -q 'unpinned Hyprland dependency is rejected' tests/test-installer.sh
           grep -q 'dependency_version_satisfied "$dep" "$repo_version"' install.sh
           grep -q 'insufficient repository package version' tests/test-installer.sh
           grep -q 'package_requires_incompatible_pin "$d"' install.sh
@@ -72,5 +74,5 @@ jobs:
 
       - name: Safe CLI smoke tests
         run: |
-          test "$(./install.sh --version)" = "1.2.2"
+          test "$(./install.sh --version)" = "1.2.4"
           ./install.sh --help >/dev/null
