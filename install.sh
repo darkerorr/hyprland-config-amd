@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.1.9"
+readonly INSTALLER_VERSION="1.2.0"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -1090,6 +1090,21 @@ aur_provided() {   # le paquet est-il un paquet AUR épinglé ?
   local e; for e in "${AUR_PINS[@]}"; do [[ ",${e##*|}," == *",$1,"* ]] && return 0; done; return 1
 }
 
+dependency_version_satisfied() {
+  local dep=$1 actual=$2 op required cmp
+  [[ $dep =~ ^[^\<\>=]+(>=|<=|=|>|<)(.+)$ ]] || return 0
+  op=${BASH_REMATCH[1]}
+  required=${BASH_REMATCH[2]}
+  cmp=$(vercmp "$actual" "$required") || return 1
+  case $op in
+    '>' ) (( cmp > 0 )) ;;
+    '>=' ) (( cmp >= 0 )) ;;
+    '=' ) (( cmp == 0 )) ;;
+    '<' ) (( cmp < 0 )) ;;
+    '<=' ) (( cmp <= 0 )) ;;
+  esac
+}
+
 # Vérifie les dépendances obligatoires du PKGBUILD avant makepkg -s.
 # Les dépendances de dépôts seront résolues par makepkg ; une dépendance AUR
 # absente ou non épinglée est signalée explicitement au lieu d'un échec opaque.
@@ -1112,6 +1127,12 @@ check_aur_dependencies() {
       aur_missing+=("$dep (dépendance AUR épinglée absente ou version installée incompatible)")
     elif ! pacman -Si "$pkg" >/dev/null 2>&1; then
       unresolved+=("$dep")
+    else
+      local repo_version
+      repo_version=$(LC_ALL=C pacman -Si "$pkg" | awk -F': ' '/^Version[[:space:]]*:/ {print $2; exit}')
+      if [[ -n $repo_version ]] && ! dependency_version_satisfied "$dep" "$repo_version"; then
+        unresolved+=("$dep (version dépôt $repo_version insuffisante)")
+      fi
     fi
   done < <(awk -F' = ' '/^[[:space:]]*(depends|makedepends|checkdepends)(_[[:alnum:]_]+)? = /{print $2}' "$srcinfo")
   if (("${#aur_missing[@]}" > 0 || "${#unresolved[@]}" > 0)); then
