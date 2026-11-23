@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.1.3"
+readonly INSTALLER_VERSION="1.1.4"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -405,13 +405,22 @@ pkg_version() {
 
 is_pinned() { local p; for p in "${PIN_ORDER[@]}"; do [[ $p == "$1" ]] && return 0; done; return 1; }
 
+target_pin_version() {
+  local n=$1
+  if [[ ${PIN_MODE[$n]} == src ]]; then
+    printf '%s%s' "${PIN_VER[$n]}" "$LOCAL_REL_SUFFIX"
+  else
+    printf '%s' "${PIN_VER[$n]}"
+  fi
+}
+
 expected_pin_version() {
   local n=$1 locked
   if [[ -f $PINS_LOCK ]]; then
     locked=$(awk -v n="$n" '$1==n{print $2}' "$PINS_LOCK")
     [[ -n $locked ]] && { printf '%s' "$locked"; return; }
   fi
-  if [[ ${PIN_MODE[$n]} == src ]]; then printf '%s%s' "${PIN_VER[$n]}" "$LOCAL_REL_SUFFIX"; else printf '%s' "${PIN_VER[$n]}"; fi
+  target_pin_version "$n"
 }
 
 # Garde-fou : aucune transaction ne doit remplacer la pile épinglée.
@@ -939,7 +948,7 @@ package_requires_incompatible_pin() {
       if [[ $token =~ ^${n}(>=|<=|=|>|<)(.+)$ ]]; then
         op=${BASH_REMATCH[1]}
         required=${BASH_REMATCH[2]}
-        actual=$(expected_pin_version "$n")
+        actual=$(target_pin_version "$n")
         cmp=$(vercmp "$actual" "$required") || continue
         case $op in
           '>' ) (( cmp <= 0 )) && return 0 ;;
