@@ -57,11 +57,12 @@ Paquets **volontairement non installés**, car end-4 les remplace par Quickshell
 | sous-module rounded-polygon-qmljs | `e31ec4cb4ebf…` | GitHub | ✅ vérifié |
 | **Quickshell** | commit `7511545ee206…` (épinglé par end-4) | git.outfoxxed.me (repli : miroir GitHub, même commit) | ⚠️ compilé contre Qt 6.12 ; repli automatique et signalé sur **v0.3.0** (`59e9c47b`, descendant direct, antérieur à la release end-4) si le commit ne compile pas |
 | Google Sans Flex | `251aa5abd304…` | GitHub end-4 (upstream clone `main` → épinglé ici) | ✅ |
+| Space Grotesk | archive 38C3 v2, SHA-256 vérifiée | archive officielle du styleguide | installée directement, sans paquet AUR `38c3-styles` |
 | Paquets Python des widgets | `sdata/uv/requirements.txt` (33 versions `==`) | PyPI via uv, Python 3.12 | ✅ comme upstream |
 | Mesa / vulkan-radeon | dépôts actuels (26.3.x) | Arch | ✅ RX 550 = Polaris 12, pilote `amdgpu`, Vulkan RADV. `libva-mesa-driver` est désormais intégré à `mesa` ; `mesa-vdpau` n’existe plus (VDPAU abandonné par Mesa ; VA‑API utilisé) |
 | PipeWire / WirePlumber / portails / Qt 6.12 / KDE | dépôts actuels | Arch | ✅ ABI stable vis-à-vis de la pile épinglée (vérifié) |
 | Waybar | — | — | non utilisé par end-4 (barre Quickshell) |
-| 11 paquets AUR (polices, thèmes, wlogout…) | commits AUR épinglés (voir `AUR_PINS` dans le script) | AUR | ✅ PKGBUILD audités : sources upstream officielles avec sommes de contrôle |
+| 9 paquets AUR (thèmes, icônes, wlogout…) | commits AUR épinglés (voir `AUR_PINS` dans le script) | AUR | ✅ PKGBUILD audités : sources upstream officielles avec sommes de contrôle |
 
 Le manifeste exact est régénéré à chaque exécution dans `~/.local/share/hypr-installer/manifests/versions-latest.txt`.
 
@@ -217,9 +218,9 @@ Vos raccourcis : `~/.config/hypr/custom/keybinds.user.conf`. Le fichier QWERTY d
 Prérequis : EndeavourOS fraîchement installé, à jour ou non ; Internet ; ≥ 25 Go libres sur `/` et ≥ 20 Go dans `$HOME` (compilations et chroot inclus). Lancez le script depuis un TTY (Ctrl+Alt+F3) ou depuis votre session actuelle. Durée typique : 30 à 60 min, essentiellement en compilations (Quickshell, chroot, AUR).
 
 
-### Correctifs de fiabilité (versions 1.0.1 et 1.0.2)
+### Correctifs de fiabilité (versions 1.0.1 et 1.0.3)
 
-- **1.0.2 — résolution AUR `38c3-styles`** : son PKGBUILD utilise `html2markdown`, `html2text` et `fontforge` pendant la compilation. L’installeur installait `html2markdown` mais omettait `python-html2text` (qui fournit `html2text`) et `fontforge`. Ces deux paquets sont désormais installés avant la compilation, avec une vérification explicite des trois exécutables.
+- **1.0.3 — suppression de la chaîne `html2markdown`** : l’installeur ne compile plus le méta-paquet AUR `38c3-styles` uniquement pour récupérer Space Grotesk. Il télécharge l’archive officielle du styleguide 38C3, vérifie sa somme SHA-256, extrait uniquement les fichiers OTF et leur licence, puis installe la police dans le profil utilisateur. Les paquets AUR `html2markdown` et `38c3-styles` sont retirés : leurs dépendances de compilation ne peuvent donc plus bloquer l’installation.
 - Les checkpoints sont invalidés lorsque le contenu de `install.sh` change : une relance ne saute plus silencieusement des étapes marquées par une ancienne version du script.
 - La sélection réseau ne réactive plus NetworkManager lorsqu’un autre gestionnaire réseau actif est détecté.
 - La session SDDM utilise le nom de session `hyprland.desktop` et normalise aussi l’utilisateur dans la section `[Last]`.
@@ -263,7 +264,7 @@ Ce qui **a** été testé :
 | Les 15 paquets épinglés existent dans l’ALA ; SHA‑256 recalculés | ✅ 15/15 |
 | Commits de packaging Arch : `pkgver-pkgrel` de chaque PKGBUILD = version épinglée | ✅ 15/15 |
 | ABI des binaires archivés vs dépôts du 22/11/2026 : `DT_NEEDED` (67 sonames) et versions de symboles Qt/libstdc++ | ✅ sauf les 3 paquets recompilés (raison documentée) |
-| 66 dépendances « dépôt » des méta-paquets end-4 présentes dans core/extra ; 11 AUR épinglés | ✅ |
+| 66 dépendances « dépôt » des méta-paquets end-4 présentes dans core/extra ; 9 AUR épinglés | ✅ |
 | `bash -n` + **ShellCheck 0.11 au niveau le plus strict (style)** sur `install.sh` et le hook généré | ✅ 0 remarque |
 | Banc de test exécutant les **vraies fonctions** dans un HOME factice : IgnorePkg (idempotent, préserve l’existant), déploiement end-4, AZERTY, raccourcis (2 passages, idempotent), sauvegardes, SDDM, détection d’écrans (2560×1440 → 143.97 Hz), démarrage | ✅ (un faux positif corrigé grâce au banc) |
 | Raccourcis analysés par le **parseur réel de l’aide end-4** (`get_keybinds.py`) | ✅ 3 colonnes, 76 entrées |
