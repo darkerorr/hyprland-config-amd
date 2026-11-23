@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.0.3"
+readonly INSTALLER_VERSION="1.0.4"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -1014,6 +1014,16 @@ install_end4_metas() {
     repo=()
     for d in "${deps[@]}"; do
       d=${d%%[<>=]*}; [[ -z $d ]] && continue
+      # end-4's fonts-themes meta-package declares otf-space-grotesk.
+      # The installer deliberately provides that font directly from the
+      # checksum-verified 38C3 archive instead of building 38c3-styles.
+      if [[ $d == otf-space-grotesk ]]; then
+        if fc-match -f '%{family}\\n' "Space Grotesk" | grep -qiF "Space Grotesk"; then
+          log "Dépendance $d satisfaite par la police Space Grotesk installée localement"
+          continue
+        fi
+        die "Dépendance $d non satisfaite : la police Space Grotesk n'est pas détectée par fontconfig."
+      fi
       if is_pinned "$d"; then pkg_installed "$d" || die "Dépendance épinglée absente : $d"; continue; fi
       if aur_provided "$d"; then pkg_installed "$d" || die "Dépendance AUR épinglée absente : $d"; continue; fi
       repo+=("$d")
