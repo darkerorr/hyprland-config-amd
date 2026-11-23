@@ -903,7 +903,7 @@ pin_broken_list() {
 
 # Paquets installés (hors pile) qui exigent une version plus récente des bibliothèques épinglées.
 package_requires_incompatible_pin() {
-  local package=$1 token n op required actual cmp dep_list pattern
+  local package=$1 token n actual dep_list pattern
   dep_list=$(LC_ALL=C pacman -Qi "$package" | awk '
     /^Depends On[[:space:]]*:/ {
       sub(/^[^:]*:[[:space:]]*/, "")
@@ -923,8 +923,6 @@ package_requires_incompatible_pin() {
     for n in "${PIN_ORDER[@]}"; do
       pattern="^${n}(>=|<=|=|>|<)(.+)$"
       if [[ $token =~ $pattern ]]; then
-        op=${BASH_REMATCH[1]}
-        required=${BASH_REMATCH[2]}
         actual=$(target_pin_version "$n")
         if ! dependency_version_satisfied "$token" "$actual"; then return 0; fi
         if pkg_installed "$n"; then
