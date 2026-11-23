@@ -217,7 +217,7 @@ Vos raccourcis : `~/.config/hypr/custom/keybinds.user.conf`. Le fichier QWERTY d
 Prérequis : EndeavourOS fraîchement installé, à jour ou non ; Internet ; ≥ 25 Go libres sur `/` et ≥ 20 Go dans `$HOME` (compilations et chroot inclus). Lancez le script depuis un TTY (Ctrl+Alt+F3) ou depuis votre session actuelle. Durée typique : 30 à 60 min, essentiellement en compilations (Quickshell, chroot, AUR).
 
 
-### Correctifs de fiabilité (branche `fix/installer-reliability`, version 1.0.1)
+### Correctifs de fiabilité (version 1.0.1)
 
 - Les checkpoints sont invalidés lorsque le contenu de `install.sh` change : une relance ne saute plus silencieusement des étapes marquées par une ancienne version du script.
 - La sélection réseau ne réactive plus NetworkManager lorsqu’un autre gestionnaire réseau actif est détecté.
