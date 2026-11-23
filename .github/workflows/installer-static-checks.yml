@@ -59,12 +59,11 @@ jobs:
             exit 1
           fi
           grep -q 'if \[\[ ! -s \$dest.sig \]\]' install.sh
-          grep -q 'remove_installer_ignorepkg()' install.sh
-          grep -q 'remove_installer_ignorepkg' install.sh
           grep -q 'remove_incompatible_dependents' install.sh
           grep -q 'ensure_ignorepkg' install.sh
           grep -q 'PINS_RESTORED' install.sh
           grep -q 'repair mode defers pin-lock validation' tests/test-installer.sh
+          grep -q 'current installed version is checked before system upgrade' tests/test-installer.sh
 
       - name: Dual-boot safety guard
         run: |
@@ -75,5 +74,5 @@ jobs:
 
       - name: Safe CLI smoke tests
         run: |
-          test "$(./install.sh --version)" = "1.2.7"
+          test "$(./install.sh --version)" = "1.2.8"
           ./install.sh --help >/dev/null
