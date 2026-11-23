@@ -12,6 +12,7 @@ source "$ROOT_DIR/install.sh"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass() { printf 'PASS: %s\n' "$*"; }
 
+MOCK_SRCINFO=""
 makepkg() {
   [[ ${1:-} == --printsrcinfo ]] || return 2
   cat "$MOCK_SRCINFO"
