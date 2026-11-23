@@ -765,7 +765,6 @@ install_aur_packages() {
     done
     ((${#files[@]})) || die "AUR $base : paquet(s) $wants introuvable(s) après compilation."
     install_pkgfiles "${files[@]}"
-    [[ $base == html2markdown ]] && sudo pacman -D --asdeps html2markdown >/dev/null
   done
   return 0
 }
