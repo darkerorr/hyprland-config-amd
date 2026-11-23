@@ -363,7 +363,16 @@ start_sudo_keepalive() {
 }
 
 pkg_installed() { pacman -Qq "$1" &>/dev/null; }
-pkg_version()   { pacman -Q "$1" 2>/dev/null | awk '{print $2}' || true; }
+pkg_version() {
+  # Un paquet absent est un état normal sur une installation fraîche.
+  # Éviter un pipeline sous pipefail : pacman -Q renvoie 1 si le paquet manque.
+  local query
+  if ! query=$(pacman -Q "$1" 2>/dev/null); then
+    return 0
+  fi
+  awk '{print $2}' <<<"$query"
+  return 0
+}
 
 is_pinned() { local p; for p in "${PIN_ORDER[@]}"; do [[ $p == "$1" ]] && return 0; done; return 1; }
 
