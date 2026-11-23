@@ -36,5 +36,5 @@ jobs:
 
       - name: Safe CLI smoke tests
         run: |
-          test "$(./install.sh --version)" = "1.0.1"
+          test "$(./install.sh --version)" = "1.0.2"
           ./install.sh --help >/dev/null
