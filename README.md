@@ -87,6 +87,8 @@ preflight → detect_system / resolve_versions → detect_hardware
 - **Adaptations séparées** : toutes les personnalisations vont dans `~/.config/hypr/custom/`, le mécanisme prévu par end-4, que leurs mises à jour ne touchent pas. Les fichiers générés portent l’en-tête `# MANAGED-BY: hypr-installer`. Vos ajouts vont dans les fichiers `*.user.conf`, jamais écrasés.
 - **Points de reprise** : `state/step-NN.done`. Une relance reprend après la dernière étape réussie.
 - **Journaux** : tout est consigné, horodaté, dans `logs/`. L’écran n’affiche que le tableau de progression et l’activité en cours.
+- **Dépendances AUR** : chaque PKGBUILD épinglé est converti en `.SRCINFO` avant compilation. Les dépendances déjà installées sont vérifiées avec `pacman -T`, celles des dépôts sont validées avant `makepkg -s`, et toute dépendance AUR absente/non épinglée est signalée explicitement avec son nom.
+- **Archives Arch** : les fichiers `.pkg.tar.zst` et leurs signatures `.sig` sont vérifiés indépendamment ; une archive présente en cache ne masque plus une signature manquante.
 - **Erreurs** : `set -Eeuo pipefail`, plus des traps `ERR`/`INT`/`TERM`/`EXIT`. En cas d’échec, l’étape passe à FAILED, la commande fautive, son code et les 15 dernières lignes du journal s’affichent, et un rapport d’échec est écrit.
 
 Fichiers produits sur la machine :
