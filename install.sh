@@ -1031,7 +1031,7 @@ check_aur_dependencies() {
     elif ! pacman -Si "$pkg" >/dev/null 2>&1; then
       unresolved+=("$dep")
     fi
-  done < <(awk -F' = ' '/^(depends|makedepends|checkdepends)(_[[:alnum:]_]+)? = /{print $2}' "$srcinfo")
+  done < <(awk -F' = ' '/^[[:space:]]*(depends|makedepends|checkdepends)(_[[:alnum:]_]+)? = /{print $2}' "$srcinfo")
   (("${#aur_missing[@]}" == 0 && "${#unresolved[@]}" == 0)) || {
     (("${#aur_missing[@]}")) && printf '  - %s\n' "${aur_missing[@]}" >&3
     (("${#unresolved[@]}")) && printf '  - %s\n' "${unresolved[@]}" >&3
