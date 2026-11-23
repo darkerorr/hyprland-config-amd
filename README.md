@@ -217,8 +217,9 @@ Vos raccourcis : `~/.config/hypr/custom/keybinds.user.conf`. Le fichier QWERTY d
 Prérequis : EndeavourOS fraîchement installé, à jour ou non ; Internet ; ≥ 25 Go libres sur `/` et ≥ 20 Go dans `$HOME` (compilations et chroot inclus). Lancez le script depuis un TTY (Ctrl+Alt+F3) ou depuis votre session actuelle. Durée typique : 30 à 60 min, essentiellement en compilations (Quickshell, chroot, AUR).
 
 
-### Correctifs de fiabilité (version 1.0.1)
+### Correctifs de fiabilité (versions 1.0.1 et 1.0.2)
 
+- **1.0.2 — résolution AUR `38c3-styles`** : son PKGBUILD utilise `html2markdown`, `html2text` et `fontforge` pendant la compilation. L’installeur installait `html2markdown` mais omettait `python-html2text` (qui fournit `html2text`) et `fontforge`. Ces deux paquets sont désormais installés avant la compilation, avec une vérification explicite des trois exécutables.
 - Les checkpoints sont invalidés lorsque le contenu de `install.sh` change : une relance ne saute plus silencieusement des étapes marquées par une ancienne version du script.
 - La sélection réseau ne réactive plus NetworkManager lorsqu’un autre gestionnaire réseau actif est détecté.
 - La session SDDM utilise le nom de session `hyprland.desktop` et normalise aussi l’utilisateur dans la section `[Last]`.
