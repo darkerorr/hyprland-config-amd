@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.0.4"
+readonly INSTALLER_VERSION="1.0.5"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -746,6 +746,7 @@ install_aur_packages() {
     if ((all_installed)) && [[ $MODE != repair ]]; then log "AUR $base déjà installé"; continue; fi
     dir="$BUILD_DIR/aur/$base"
     git_checkout_pinned "https://aur.archlinux.org/$base.git" "$dir" "$commit"
+    check_aur_dependencies "$dir" "$base"
     if [[ $base == wlogout ]] && ! gpg --list-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F &>/dev/null; then
       gpg --keyserver hkps://keys.openpgp.org --recv-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F \
         || gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F \
@@ -822,14 +823,22 @@ install_graphics() {
 # =============================================================================
 # 9. ÉTAPE 05 — PILE HYPRLAND 0.54.3 ÉPINGLÉE
 # =============================================================================
-ala_fetch() {   # télécharge + vérifie (SHA-256 et signature pacman) un paquet archivé
+ala_fetch() {   # télécharge + vérifie séparément l'archive et sa signature
   local n=$1 fn url dest
   fn="$n-${PIN_VER[$n]}-x86_64.pkg.tar.zst"; url="$ALA_URL/${n:0:1}/$n/$fn"; dest="$PKG_CACHE/ala/$fn"
   mkdir -p "$PKG_CACHE/ala"
   if [[ ! -f $dest ]] || ! sha256sum -c --status <<<"${PIN_SHA256[$n]}  $dest"; then
-    curl -fL --retry 3 --max-time 600 -o "$dest.part" "$url"
-    curl -fL --retry 3 --max-time 60 -o "$dest.sig" "$url.sig"
-    mv -f "$dest.part" "$dest"
+    rm -f -- "$dest.part"
+    curl -fL --retry 3 --max-time 600 -o "$dest.part" "$url" || { rm -f -- "$dest.part"; die "Téléchargement impossible : $fn"; }
+    sha256sum -c --status <<<"${PIN_SHA256[$n]}  $dest.part" || { rm -f -- "$dest.part"; die "SHA-256 invalide pour $fn"; }
+    mv -f -- "$dest.part" "$dest"
+  fi
+  # Une archive valide en cache ne garantit pas que son .sig soit encore présent.
+  if [[ ! -s $dest.sig ]]; then
+    rm -f -- "$dest.sig.part"
+    curl -fL --retry 3 --max-time 60 -o "$dest.sig.part" "$url.sig" || { rm -f -- "$dest.sig.part"; die "Signature Arch introuvable pour $fn"; }
+    [[ -s $dest.sig.part ]] || die "Signature Arch vide pour $fn"
+    mv -f -- "$dest.sig.part" "$dest.sig"
   fi
   sha256sum -c --status <<<"${PIN_SHA256[$n]}  $dest" || { rm -f -- "$dest"; die "SHA-256 invalide pour $fn"; }
   sudo pacman-key --verify "$dest.sig" "$dest" >/dev/null 2>&1 || die "Signature Arch invalide pour $fn"
@@ -1004,6 +1013,32 @@ aur_provided() {   # le paquet est-il un paquet AUR épinglé ?
   local e; for e in "${AUR_PINS[@]}"; do [[ ",${e##*|}," == *",$1,"* ]] && return 0; done; return 1
 }
 
+# Vérifie les dépendances obligatoires du PKGBUILD avant makepkg -s.
+# Les dépendances de dépôts seront résolues par makepkg ; une dépendance AUR
+# absente ou non épinglée est signalée explicitement au lieu d'un échec opaque.
+check_aur_dependencies() {
+  local dir=$1 base=$2 line dep pkg
+  local srcinfo="$dir/.SRCINFO"
+  local -a unresolved=() aur_missing=()
+  (cd "$dir" && makepkg --printsrcinfo) >"$srcinfo" || die "AUR $base : génération de .SRCINFO impossible."
+  while IFS= read -r line; do
+    dep=${line#*=}; dep=${dep# }
+    pkg=${dep%%[<>=]*}
+    [[ -n $pkg ]] || continue
+    pacman -T "$dep" >/dev/null 2>&1 && continue
+    if aur_provided "$pkg"; then
+      pkg_installed "$pkg" || aur_missing+=("$dep (AUR épinglé, ordre de construction incorrect)")
+    elif ! pacman -Si "$pkg" >/dev/null 2>&1; then
+      unresolved+=("$dep")
+    fi
+  done < <(awk -F' = ' '/^(depends|makedepends|checkdepends)(_[[:alnum:]_]+)? = /{print $2}' "$srcinfo")
+  (("${#aur_missing[@]}" == 0 && "${#unresolved[@]}" == 0)) || {
+    (("${#aur_missing[@]}")) && printf '  - %s\n' "${aur_missing[@]}" >&3
+    (("${#unresolved[@]}")) && printf '  - %s\n' "${unresolved[@]}" >&3
+    die "AUR $base : dépendances non résolues avant compilation. Voir les éléments listés ci-dessus."
+  }
+}
+
 install_end4_metas() {
   local m dir d bdir f
   local -a deps repo files
@@ -1114,7 +1149,11 @@ end4_setups() {   # équivalent de sdata/subcmd-install/2.setups.sh (Arch)
     gsettings set org.gnome.desktop.interface font-name 'Google Sans Flex Medium 11 @opsz=11,wght=500'
     gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'" \
     || warn "gsettings indisponible hors session (sera appliqué par end-4 au premier lancement)"
-  kwriteconfig6 --file kdeglobals --group KDE --key widgetStyle Darkly
+  if command -v kwriteconfig6 >/dev/null 2>&1; then
+    kwriteconfig6 --file kdeglobals --group KDE --key widgetStyle Darkly
+  else
+    warn "kwriteconfig6 absent : préférence de style KDE laissée inchangée."
+  fi
   ok "Groupes (video, i2c, input), i2c-dev, ydotool, préférences GTK/KDE"
 }
 
