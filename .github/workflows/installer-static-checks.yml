@@ -39,6 +39,8 @@ jobs:
           grep -q 'check_aur_dependencies "$dir" "$base"' install.sh
           grep -q 'check_aur_dependencies "$dir" "illogical-impulse-$m"' install.sh
           grep -q 'pacman -T "$dep"' install.sh
+          grep -q 'package_requires_incompatible_pin "$d"' install.sh
+          grep -q 'vercmp "$actual" "$required"' install.sh
           grep -Fq "^[[:space:]]*(depends|makedepends|checkdepends)" install.sh
           if grep -nE 'makepkg .*--needed' install.sh; then
             echo "--needed must only be used by makepkg with --install"
@@ -55,5 +57,5 @@ jobs:
 
       - name: Safe CLI smoke tests
         run: |
-          test "$(./install.sh --version)" = "1.0.9"
+          test "$(./install.sh --version)" = "1.1.0"
           ./install.sh --help >/dev/null
