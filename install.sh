@@ -718,7 +718,9 @@ ensure_ignorepkg() {
 
 install_system_packages() {
   ensure_ignorepkg
-  spin "Mise à jour des trousseaux de clés" sudo pacman -Sy --needed --noconfirm archlinux-keyring "$(pkg_installed endeavouros-keyring && echo endeavouros-keyring || echo archlinux-keyring)"
+  local -a keyring_pkgs=(archlinux-keyring)
+  pkg_installed endeavouros-keyring && keyring_pkgs+=(endeavouros-keyring)
+  spin "Mise à jour des trousseaux de clés" sudo pacman -Sy --needed --noconfirm "${keyring_pkgs[@]}"
   spin "Mise à jour complète du système (pacman -Syu)" sudo pacman -Syu --noconfirm
   assert_pins_intact
   # PulseAudio est remplacé par PipeWire (conflit avec pipewire-pulse).
