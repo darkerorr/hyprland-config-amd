@@ -363,7 +363,7 @@ start_sudo_keepalive() {
 }
 
 pkg_installed() { pacman -Qq "$1" &>/dev/null; }
-pkg_version()   { pacman -Q "$1" 2>/dev/null | awk '{print $2}'; }
+pkg_version()   { pacman -Q "$1" 2>/dev/null | awk '{print $2}' || true; }
 
 is_pinned() { local p; for p in "${PIN_ORDER[@]}"; do [[ $p == "$1" ]] && return 0; done; return 1; }
 
