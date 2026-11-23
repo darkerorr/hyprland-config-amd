@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.1.5"
+readonly INSTALLER_VERSION="1.1.6"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -1854,7 +1854,7 @@ validate_installation() {
   chk_if "Environnement Python des widgets" '[[ $pyok == ok ]]' "${VENV_DIR/#$HOME/\~}"
   local c miss=""
   for c in matugen cliphist wl-paste grim slurp hyprpicker fuzzel ydotool cava kdialog tesseract wf-recorder swappy hyprshot \
-           trans songrec qalc ddcutil brightnessctl playerctl wpctl kitty dolphin kwriteconfig6; do
+           trans songrec qalc ddcutil brightnessctl playerctl wpctl kitty dolphin; do
     command -v "$c" >/dev/null || miss+="$c "
   done
   chk_if "Outils requis par les widgets" '[[ -z $miss ]]' "tous présents" FAIL "manquants : $miss"
