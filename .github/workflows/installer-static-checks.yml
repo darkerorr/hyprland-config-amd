@@ -37,7 +37,13 @@ jobs:
           grep -q 'd == otf-space-grotesk' install.sh
           grep -q 'fc-match.*Space Grotesk' install.sh
           grep -q 'check_aur_dependencies "$dir" "$base"' install.sh
+          grep -q 'check_aur_dependencies "$bdir" "illogical-impulse-$m"' install.sh
           grep -q 'pacman -T "$dep"' install.sh
+          grep -Fq "^[[:space:]]*(depends|makedepends|checkdepends)" install.sh
+          if grep -nE 'makepkg .*--needed' install.sh; then
+            echo "--needed must only be used by makepkg with --install"
+            exit 1
+          fi
           grep -q 'if \[\[ ! -s \$dest.sig \]\]' install.sh
 
       - name: Dual-boot safety guard
@@ -49,5 +55,5 @@ jobs:
 
       - name: Safe CLI smoke tests
         run: |
-          test "$(./install.sh --version)" = "1.0.5"
+          test "$(./install.sh --version)" = "1.0.6"
           ./install.sh --help >/dev/null
