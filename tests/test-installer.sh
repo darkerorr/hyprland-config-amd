@@ -97,6 +97,16 @@ if check_aur_dependencies "$TEST_DIR/pkg" fixture 3>&1 >/dev/null 2>&1; then
 fi
 pass "missing AUR dependency is rejected"
 
+# AUR makepkg must never fetch a Hyprland package from the unpinned sync repos.
+cat >"$TEST_DIR/srcinfo" <<'SRC'
+pkgbase = fixture
+    depends = hyprland>=0.54.3
+SRC
+if check_aur_dependencies "$TEST_DIR/pkg" fixture 3>&1 >/dev/null 2>&1; then
+  fail "unpinned Hyprland repository dependency was accepted"
+fi
+pass "unpinned Hyprland dependency is rejected"
+
 # A dependency absent from configured repositories must be reported.
 cat >"$TEST_DIR/srcinfo" <<'SRC'
 pkgbase = fixture
