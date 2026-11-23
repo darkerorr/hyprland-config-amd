@@ -348,13 +348,10 @@ on_exit() {
 }
 
 checkpoint_key() {
-  # Invalide les étapes terminées si le script OU son manifeste de dépendances change.
-  # Cela évite de réutiliser un ancien checkpoint après une correction de l'installateur.
+  # Invalide les checkpoints dès que le script change.
   local script_hash
   script_hash=$(sha256sum "$SCRIPT_SELF" | awk '{print $1}')
-  printf '%s|%s|%s|%s|%s|%s|%s|%s' \
-    "$INSTALLER_VERSION" "$script_hash" "$END4_COMMIT" "$QS_COMMIT" \
-    "${PIN_ORDER[*]}" "${PIN_VER[*]}" "${END4_METAS[*]}" "${AUR_PINS[*]}" \
+  printf '%s|%s|%s|%s' "$INSTALLER_VERSION" "$script_hash" "$END4_COMMIT" "$QS_COMMIT" \
     | sha256sum | cut -c1-16
 }
 checkpoint_done() { [[ -f $STATE_DIR/step-$1.done && "$(<"$STATE_DIR/step-$1.done")" == "$(checkpoint_key)" ]]; }
@@ -585,7 +582,7 @@ preflight() {
   for fs in / "$HOME"; do
     free=$(LC_ALL=C df -BG --output=avail "$fs" | tail -1 | tr -dc '0-9')
     if [[ $fs == / ]] && ((free < 25)); then die "Espace insuffisant sur / : ${free} Go (25 Go requis pour les paquets et le chroot de compilation)."; fi
-    if [[ $fs == "$HOME" ]] && ((free < 20)); then die "Espace insuffisant dans $HOME : ${free} Go (20 Go requis pour les sources, caches et reconstructions)."; fi
+    if [[ $fs == "$HOME" ]] && ((free < 20)); then die "Espace insuffisant dans $HOME : ${free} Go (20 Go requis pour les sources et caches de compilation)."; fi
   done
   ok "Espace disque suffisant"
   if [[ $IN_SESSION == Hyprland && -n $EXISTING_HYPR && $EXISTING_HYPR != "$(expected_pin_version hyprland)" ]]; then
@@ -1545,11 +1542,9 @@ configure_audio() {
 configure_network() {
   pac_install "${NET_PKGS[@]}"
   if systemctl is-active --quiet NetworkManager.service; then
-    # NetworkManager est déjà le gestionnaire actif : le conserver au démarrage.
     sudo systemctl enable NetworkManager.service
     ok "NetworkManager actif et activé au démarrage"
   elif systemctl is-active --quiet systemd-networkd.service || systemctl is-active --quiet iwd.service; then
-    # Ne jamais activer NetworkManager en parallèle d'un autre gestionnaire réseau actif.
     warn "Un autre gestionnaire réseau est actif (systemd-networkd/iwd) : NetworkManager reste désactivé pour préserver la connexion."
   else
     sudo systemctl enable --now NetworkManager.service
@@ -1589,14 +1584,19 @@ configure_login_manager() {
       tmp=$(mktemp "$TMP_DIR/state.XXXXXX")
       # shellcheck disable=SC2024  # lecture d'un fichier root vers un fichier temporaire utilisateur (voulu)
       if sudo test -f "$st"; then sudo cat "$st" >"$tmp"; fi
-      if ! grep -q '^Session=hyprland.desktop
-        awk -v u="$USER" '
-          BEGIN{inlast=0; done=0}
-          /^\[Last\]/{print; print "Session=hyprland.desktop"; print "User=" u; inlast=1; done=1; next}
-          /^\[/{inlast=0}
-          inlast && /^(Session|User)=/{next}
-          {print}
-          END{if(!done){print "[Last]"; print "Session=hyprland.desktop"; print "User=" u}}' "$tmp" >"$tmp.new"
+      awk -v u="$USER" '
+        function flush_last() {
+          if (inlast && !session) print "Session=hyprland.desktop"
+          if (inlast && !user) print "User=" u
+        }
+        /^\[Last\]/ { flush_last(); print; inlast=1; found=1; session=0; user=0; next }
+        /^\[/ { flush_last(); inlast=0 }
+        inlast && /^Session=/ { if (!session) print "Session=hyprland.desktop"; session=1; next }
+        inlast && /^User=/ { if (!user) print "User=" u; user=1; next }
+        { print }
+        END { flush_last(); if (!found) { print "[Last]"; print "Session=hyprland.desktop"; print "User=" u } }
+      ' "$tmp" >"$tmp.new"
+      if ! sudo cmp -s "$tmp.new" "$st"; then
         sudo_write "$st" 644 <"$tmp.new"
         sudo chown sddm:sddm "$st" 2>/dev/null || true
       fi
@@ -1662,327 +1662,6 @@ validate_installation() {
   else
     qdiff=$(diff -qr "$END4_DIR/dots/.config/quickshell" "$CFG/quickshell" 2>/dev/null | head -3 || true)
   fi
-  chk_if "Fichiers Quickshell identiques à la release" '[[ -z $qdiff ]]' "$CFG/quickshell" WARN "${qdiff:-}"
-  local qsc; qsc=$(state_get quickshell.commit)
-  chk_if "Quickshell installé" 'pkg_installed illogical-impulse-quickshell-git && command -v qs >/dev/null' "commit ${qsc:0:12}$([[ $qsc == "$QS_FALLBACK_COMMIT" ]] && echo ' (repli v0.3.0)')"
-  chk_if "Quickshell compatible avec Qt installé" 'quickshell --private-check-compat >/dev/null 2>&1' "Qt $(pkg_version qt6-base)" WARN
-  local pyok; pyok=$("$VENV_DIR/bin/python" -c 'import materialyoucolor, PIL, cv2, numpy, psutil, loguru; print("ok")' 2>/dev/null || true)
-  chk_if "Environnement Python des widgets" '[[ $pyok == ok ]]' "${VENV_DIR/#$HOME/\~}"
-  local c miss=""
-  for c in matugen cliphist wl-paste grim slurp hyprpicker fuzzel ydotool cava kdialog tesseract wf-recorder swappy hyprshot \
-           trans songrec qalc ddcutil brightnessctl playerctl wpctl kitty dolphin kwriteconfig6; do
-    command -v "$c" >/dev/null || miss+="$c "
-  done
-  chk_if "Outils requis par les widgets" '[[ -z $miss ]]' "tous présents" FAIL "manquants : $miss"
-  chk_if "Session Wayland Hyprland" '[[ -f /usr/share/wayland-sessions/hyprland.desktop && -x /usr/bin/start-hyprland ]]' "hyprland.desktop -> start-hyprland"
-  chk_if "Portails XDG" 'pkg_installed xdg-desktop-portal && [[ -f /usr/share/xdg-desktop-portal/portals/hyprland.portal && -f $CFG/xdg-desktop-portal/hyprland-portals.conf ]]' "hyprland + gtk + kde"
-  chk_if "Polkit" 'pkg_installed polkit && ! pkg_installed hyprpolkitagent' "agent : Quickshell (PolkitService)"
-  chk_if "Audio (PipeWire activé)" '[[ -e /etc/systemd/user/sockets.target.wants/pipewire.socket || -e /usr/lib/systemd/user/sockets.target.wants/pipewire.socket ]] && pkg_installed wireplumber && pkg_installed pipewire-pulse' "pipewire, pulse, wireplumber"
-  chk_if "Réseau (NetworkManager)" 'systemctl is-active --quiet NetworkManager' "$(nmcli -t networking connectivity 2>/dev/null || echo '?')" WARN
-  if ((BT_ADAPTER)); then chk_if "Bluetooth" 'systemctl is-active --quiet bluetooth' "adaptateur détecté" WARN
-  else chk INFO "Bluetooth" "aucun adaptateur (service activé, démarrage conditionnel)"; fi
-  chk_if "GPU AMD détecté" '((HAS_AMD_GPU))' "pilote ${GPU_DRIVER:-?}"
-  local vk; vk=$(vulkaninfo --summary 2>/dev/null | grep -m1 deviceName | sed 's/.*= //' || true)
-  chk_if "Vulkan (RADV)" '[[ $vk == *RADV* ]]' "${vk:-non confirmé hors session}" WARN
-  local fm="" fams; fams=$(fc-list : family); for c in "Google Sans Flex" "Material Symbols Rounded" "JetBrainsMono Nerd Font" "Noto Sans" "Font Awesome"; do containsi "$c" "$fams" || fm+="$c, "; done
-  chk_if "Polices installées" '[[ -z $fm ]]' "end-4 + Noto + Nerd + Font Awesome" WARN "manquantes : ${fm%, }"
-  chk_if "AZERTY configuré" 'grep -q "kb_layout = fr" "$HYPR_CUSTOM/general.conf" && contains "X11 Layout: fr" "$(localectl status)"' "Hyprland, console, X11"
-  local nb; nb=$(grep -cE '^bind' "$HYPR_CUSTOM/keybinds.conf" 2>/dev/null || true); nb=${nb:-0}
-  chk_if "Raccourcis clavier configurés" 'grep -q "^\$dontLoadDefaultKeybinds = true" "$HYPR_CUSTOM/variables.conf" && ((nb > 100))' "$nb liaisons AZERTY"
-  local wsn; wsn=$(grep -cE '^bind = Super(\+Shift)?, code:(1[0-9]),' "$HYPR_CUSTOM/keybinds.conf" 2>/dev/null || true); wsn=${wsn:-0}
-  chk_if "Workspaces 1-10 configurés" '((wsn == 20))' "Super+[1-0] et Super+Maj+[1-0]"
-  chk_if "Gestionnaire de connexion" '[[ -n $CURRENT_DM ]] && systemctl is-enabled --quiet display-manager.service' "${CURRENT_DM:-aucun}"
-  chk_if "Autostart configuré" 'grep -q -- "--first-login" "$HYPR_CUSTOM/execs.conf" && [[ -x $BIN_DIR/install.sh ]]' "exec-once (end-4 + premier démarrage)"
-  local dup=""; for c in dunst mako swaync hyprpolkitagent; do pkg_installed "$c" && dup+="$c "; done
-  systemctl --user is-enabled hypridle.service &>/dev/null && dup+="hypridle.service "
-  chk_if "Aucun conflit de démarrage" '[[ -z $dup ]]' "instance unique de chaque composant" WARN "à vérifier : $dup"
-  chk_if "Chargeur de démarrage non modifié" 'true' "aucune commande bootloader/partition exécutée"
-  chk INFO "Tests en session graphique" "automatiques au premier login (rapport + notification)"
-  if ((CHECK_FAIL)); then STEP_STATUS[CURRENT_STEP]=FAILED; elif ((CHECK_WARN)); then STEP_WARN[CURRENT_STEP]=1; fi
-}
-
-write_report() {
-  local title=${1:-"Rapport d’installation"} f
-  mkdir -p "$REPORT_DIR"
-  f="$REPORT_DIR/report-$RUN_TS-$MODE.txt"
-  {
-    printf 'HYPRLAND AUTOMATED INSTALLER %s — %s\n' "$INSTALLER_VERSION" "$title"
-    printf 'Date : %s   Mode : %s   Utilisateur : %s\n\n' "$(date '+%F %T')" "$MODE" "$USER"
-    printf 'Étapes :\n'; local i; for i in $(seq 1 12); do printf '  [%02d/12] %-27s %s\n' "$i" "${STEP_TITLES[i]}" "${STEP_STATUS[i]}"; done
-    printf '\nContrôles (%d OK, %d avertissements, %d échecs) :\n' "$CHECK_PASS" "$CHECK_WARN" "$CHECK_FAIL"
-    printf '  %s\n' "${CHECK_LINES[@]:-aucun}"
-    printf '\nAvertissements :\n'; printf '  - %s\n' "${WARNINGS[@]:-aucun}"
-    printf '\nManifeste des versions :\n'; cat "$MANIFEST_DIR/versions-latest.txt" 2>/dev/null || true
-    printf '\nJournal : %s\nSauvegardes : %s\n' "$LOG_FILE" "$BACKUP_DIR"
-  } >"$f"
-  cp -f "$f" "$REPORT_DIR/latest-$MODE.txt"
-  printf '%s' "$f"
-}
-
-generate_report() {
-  local f; f=$(write_report)
-  ui ""
-  ui "  Rapport : ${f/#$HOME/\~}"
-}
-
-# =============================================================================
-# 17. MODES SESSION : premier démarrage et tests post-connexion
-# =============================================================================
-wait_for() { local t=$1; shift; local i; for ((i = 0; i < t; i++)); do "$@" &>/dev/null && return 0; sleep 1; done; return 1; }
-
-session_monitors() {
-  local conf="$CFG/hypr/monitors.conf" line
-  if grep -qE '^\s*monitor\s*=' "$conf" 2>/dev/null; then log "monitors.conf déjà configuré"; return 0; fi
-  local out=""
-  while IFS=$'\t' read -r name w h modes; do
-    local best="" bestr=0 m r
-    for m in $modes; do
-      [[ $m == "${w}x${h}@"* ]] || continue
-      r=${m#*@}; r=${r%Hz}
-      if awk -v a="$r" -v b="$bestr" 'BEGIN{exit !(a>b)}'; then bestr=$r; best=$m; fi
-    done
-    [[ -n $best ]] || continue
-    local scale=1; ((w >= 3840)) && scale=auto
-    line="monitor = $name, ${best%Hz}, auto, $scale"
-    out+="$line"$'\n'
-    log "Écran $name : $line (modes : $modes)"
-  done < <(hyprctl monitors all -j | jq -r '.[] | [.name, (.width|tostring), (.height|tostring), (.availableModes|join(" "))] | @tsv')
-  [[ -n $out ]] || return 0
-  { cat "$conf" 2>/dev/null; printf '\n%s — détecté au premier démarrage (résolution native, fréquence max.)\n%s' "$MANAGED_MARK" "$out"; } >"$conf.tmp"
-  mv -f "$conf.tmp" "$conf"
-  hyprctl reload >/dev/null
-}
-
-session_wallpaper() {
-  local cfgjson="$CFG/illogical-impulse/config.json" wp wall
-  wait_for 40 test -s "$cfgjson" || { log "config.json absent"; return 0; }
-  wp=$(jq -r '.background.wallpaperPath // ""' "$cfgjson" 2>/dev/null || true)
-  [[ -z $wp ]] || { log "Fond d’écran déjà défini : $wp"; return 0; }
-  wall=$(state_get default-wallpaper); [[ -f $wall ]] || wall=$DEFAULT_WALLPAPER
-  "$CFG/quickshell/ii/scripts/colors/switchwall.sh" --image "$wall" --mode dark || log "switchwall a échoué"
-}
-
-post_login_check() {
-  CHECK_LINES=(); CHECK_FAIL=0; CHECK_WARN=0; CHECK_PASS=0
-  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] || { chk FAIL "Session Hyprland" "à lancer depuis une session Hyprland"; return 0; }
-  local v; v=$(hyprctl version -j 2>/dev/null | jq -r '.tag // .version // ""')
-  chk_if "Hyprland en cours d’exécution" '[[ $v == *0.54.3* ]]' "$v"
-  chk_if "Wayland opérationnel" '[[ -n ${WAYLAND_DISPLAY:-} && $XDG_SESSION_TYPE == wayland ]]' "${WAYLAND_DISPLAY:-?}"
-  chk_if "Quickshell opérationnel" 'qs -c ii ipc call TEST_ALIVE' "IPC TEST_ALIVE"
-  local nq nq2; nq=$(pgrep -xc qs 2>/dev/null || true); nq2=$(pgrep -xc quickshell 2>/dev/null || true); nq=$(( ${nq:-0} + ${nq2:-0} ))
-  chk_if "Une seule instance de Quickshell" '((nq == 1))' "$nq processus"
-  chk_if "Widgets disponibles" '[[ -s $CFG/illogical-impulse/config.json ]] && qs -c ii ipc show >/dev/null' "barre, panneaux, OSD, lanceur"
-  chk_if "Portails opérationnels" 'busctl --user status org.freedesktop.portal.Desktop >/dev/null && pgrep -x xdg-desktop-portal-hyprland >/dev/null' "xdg-desktop-portal + hyprland" WARN
-  chk_if "Audio opérationnel" 'wpctl inspect @DEFAULT_AUDIO_SINK@ >/dev/null' "$(wpctl inspect @DEFAULT_AUDIO_SINK@ 2>/dev/null | grep -m1 'node.description' | cut -d'"' -f2)" WARN
-  chk_if "Réseau opérationnel" '[[ $(nmcli -t networking connectivity) == full ]]' "$(nmcli -t networking connectivity 2>/dev/null)" WARN
-  local km; km=$(hyprctl devices -j | jq -r '[.keyboards[] | select(.main == true) | .active_keymap][0] // .keyboards[0].active_keymap')
-  chk_if "Disposition AZERTY active" '[[ $km == *French* ]]' "$km"
-  local nb; nb=$(hyprctl binds -j | jq 'length')
-  chk_if "Raccourcis chargés" '((nb > 100))' "$nb liaisons actives"
-  chk_if "Raccourci Super+R (terminal)" 'hyprctl binds -j | jq -e ".[] | select(.modmask == 64 and .key == \"R\")" >/dev/null' "kitty"
-  chk_if "Workspaces Super+1…0" '(( $(hyprctl binds -j | jq "[.[] | select(.modmask == 64 and (.keycode >= 10 and .keycode <= 19))] | length") == 10 ))' "codes physiques 10-19"
-  chk_if "Écrans détectés" 'hyprctl monitors -j | jq -e "length > 0" >/dev/null' "$(hyprctl monitors -j | jq -r '.[] | "\(.name) \(.width)x\(.height)@\(.refreshRate|floor)Hz"' | paste -sd', ')"
-  local r; r=$(hyprctl -j getoption decoration:blur:passes | jq -r '.int')
-  chk INFO "Accélération graphique" "$(LC_ALL=C eglinfo -B 2>/dev/null | grep -m1 'OpenGL renderer' | cut -d: -f2 | xargs || echo 'eglinfo indisponible') — flou $r passes"
-  chk INFO "Polkit (manuel)" "lancez « pkexec true » : la fenêtre doit venir de Quickshell"
-}
-
-first_login() {
-  mkdir -p "$LOG_DIR" "$STATE_DIR" "$REPORT_DIR"
-  LOG_FILE="$LOG_DIR/first-login-$RUN_TS.log"
-  exec 3>/dev/null 4>/dev/null 5>>"$LOG_FILE" >>"$LOG_FILE" 2>&1
-  [[ -f $STATE_DIR/first-login.done ]] && { log "Premier démarrage déjà effectué"; return 0; }
-  wait_for 60 hyprctl version || exit 0
-  wait_for 60 qs -c ii ipc call TEST_ALIVE || log "Quickshell non joignable après 60 s"
-  session_monitors
-  session_wallpaper
-  sleep 3
-  post_login_check
-  local f; f=$(write_report "Tests en session graphique (premier démarrage)")
-  if ((CHECK_FAIL)); then
-    notify-send -u critical -a "Installation Hyprland" "Installation : $CHECK_FAIL problème(s) détecté(s)" "Rapport : $f"
-  else
-    notify-send -a "Installation Hyprland" "Bureau prêt ✔" "$CHECK_PASS tests OK, $CHECK_WARN avertissement(s). Super+F1 : liste des raccourcis."
-  fi
-  date '+%F %T' >"$STATE_DIR/first-login.done"
-}
-
-# =============================================================================
-# 18. PROGRAMME PRINCIPAL
-# =============================================================================
-usage() {
-  cat <<EOF
-HYPRLAND AUTOMATED INSTALLER $INSTALLER_VERSION
-EndeavourOS × Hyprland ${PIN_VER[hyprland]%-*} × end-4/dots-hyprland $END4_TAG
-
-Usage : ./install.sh [options]
-
-  (sans option)        Installation complète, avec reprise automatique après interruption
-  --yes                Ne pas demander la confirmation initiale
-  --force              Réexécuter toutes les étapes (ignore les points de reprise)
-  --diagnose           Mode diagnostic : contrôles et rapport, aucune modification
-  --repair             Réparation : revérifie la pile épinglée, recompile ce qui est
-                       cassé (ex. après une mise à jour de bibliothèque), redéploie
-  --post-login-check   Tests à exécuter DANS la session Hyprland
-  --allow-non-eos      Autoriser une base Arch autre qu’EndeavourOS
-  --allow-other-gpu    Autoriser l’absence de GPU AMD
-  --no-reboot-prompt   Ne pas proposer le redémarrage à la fin
-  -h, --help           Cette aide     --version   Version
-
-Journaux, sauvegardes, rapports : ~/.local/share/hypr-installer/
-EOF
-}
-
-parse_args() {
-  while (($#)); do
-    case $1 in
-      --yes|-y) ASSUME_YES=1 ;;
-      --force) FORCE=1 ;;
-      --diagnose) MODE=diagnose ;;
-      --repair) MODE=repair; FORCE=1 ;;
-      --post-login-check) MODE=post-login-check ;;
-      --first-login) MODE=first-login ;;
-      --allow-non-eos) ALLOW_NON_EOS=1 ;;
-      --allow-other-gpu) ALLOW_OTHER_GPU=1 ;;
-      --no-reboot-prompt) NO_REBOOT_PROMPT=1 ;;
-      -h|--help) usage; exit 0 ;;
-      --version) printf '%s\n' "$INSTALLER_VERSION"; exit 0 ;;
-      *) printf 'Option inconnue : %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
-    esac
-    shift
-  done
-}
-
-main() {
-  exec 5>/dev/null
-  parse_args "$@"
-  umask 022
-  mkdir -p "$LOG_DIR" "$BACKUP_ROOT" "$STATE_DIR" "$REPORT_DIR" "$MANIFEST_DIR" "$BIN_DIR" "$PKG_CACHE" "$BUILD_DIR"
-  trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
-  trap on_interrupt INT TERM
-  trap on_exit EXIT
-  TMP_DIR=$(mktemp -d /tmp/hypr-installer.XXXXXX)
-
-  if [[ $MODE == first-login ]]; then first_login; exit 0; fi
-  if [[ $MODE == post-login-check ]]; then
-    LOG_FILE="$LOG_DIR/post-login-$RUN_TS.log"
-    exec 3>&1 4>&2 5>>"$LOG_FILE"; exec >>"$LOG_FILE" 2>&1
-    post_login_check; ui ""; ui "  Rapport : $(write_report "Tests en session graphique")"
-    exit $((CHECK_FAIL > 0))
-  fi
-
-  exec 3>&1 4>&2 5>>"$LOG_FILE"
-  exec >>"$LOG_FILE" 2>&1
-  log "hypr-installer $INSTALLER_VERSION — mode $MODE — $(uname -a)"
-  draw_dashboard
-
-  if [[ $MODE == diagnose ]]; then
-    run_step 1 preflight resolve_versions
-    run_step 2 detect_hardware
-    local i; for i in 3 4 5 6 7 8 9 10 11; do STEP_STATUS[i]=SKIPPED; done
-    CURRENT_DM=${CURRENT_DM:-}
-    # Le diagnostic ne réalise aucune installation : ne pas valider les fichiers
-    # et paquets que les étapes volontairement ignorées doivent créer.
-    run_step 12 diagnose_summary generate_report
-    exit 0
-  fi
-
-  run_step 1 preflight resolve_versions confirm_plan
-  run_step 2 detect_hardware
-  run_step 3 install_system_packages
-  run_step 4 install_graphics
-  run_step 5 install_hyprland
-  run_step 6 install_end4
-  run_step 7 install_quickshell
-  run_step 8 configure_keyboard
-  run_step 9 configure_keybindings
-  run_step 10 configure_desktop
-  run_step 11 configure_all_services
-  run_step 12 validate_installation generate_report
-
-  ui ""
-  if ((CHECK_FAIL)); then
-    ui "  ${C_RED}${C_B}Installation terminée avec $CHECK_FAIL échec(s) de validation.${C_RST} Consultez le rapport ci-dessus."
-    ui "  Correction automatique : ./install.sh --repair"
-    exit 1
-  fi
-  ui "  ${C_GRN}${C_B}Installation terminée.${C_RST} ${CHECK_WARN} avertissement(s)."
-  ui "  Au redémarrage : écran de connexion -> session « Hyprland » (présélectionnée)."
-  ui "  Aide des raccourcis : Super+F1. Les tests en session s’exécutent seuls au premier login."
-  if ((!NO_REBOOT_PROMPT)) && ask_yes_no "Redémarrer maintenant ?"; then
-    log "Redémarrage demandé"; sudo systemctl reboot
-  fi
-}
-
-main "$@"
- "$tmp"; then
-        awk -v u="$USER" '
-          BEGIN{inlast=0; done=0}
-          /^\[Last\]/{print; print "Session=/usr/share/wayland-sessions/hyprland.desktop"; print "User=" u; inlast=1; done=1; next}
-          /^\[/{inlast=0}
-          inlast && /^(Session|User)=/{next}
-          {print}
-          END{if(!done){print "[Last]"; print "Session=/usr/share/wayland-sessions/hyprland.desktop"; print "User=" u}}' "$tmp" >"$tmp.new"
-        sudo_write "$st" 644 <"$tmp.new"
-        sudo chown sddm:sddm "$st" 2>/dev/null || true
-      fi
-      ok "SDDM : session Hyprland présélectionnée (écran de connexion en AZERTY via X11)" ;;
-    gdm|lightdm|lxdm|ly)
-      local acc="/var/lib/AccountsService/users/$USER"
-      if [[ -d /var/lib/AccountsService/users ]]; then
-        local cur=""; sudo test -f "$acc" && cur=$(sudo cat "$acc")
-        if ! grep -q '^Session=hyprland$' <<<"$cur"; then
-          { if grep -q '^\[User\]' <<<"$cur"; then sed -e '/^Session=/d' -e '/^XSession=/d' -e 's/^\[User\]$/[User]\nSession=hyprland/' <<<"$cur"
-            else printf '%s\n[User]\nSession=hyprland\n' "$cur"; fi; } | sudo_write "$acc" 600
-        fi
-      fi
-      ok "$CURRENT_DM : session Hyprland présélectionnée (AccountsService)" ;;
-    *) warn "Gestionnaire de connexion « $CURRENT_DM » : sélectionnez « Hyprland » manuellement au premier login." ;;
-  esac
-  pkg_installed uwsm && warn "Choisissez « Hyprland » et non « Hyprland (uwsm-managed) » à l’écran de connexion."
-  return 0
-}
-
-configure_all_services() { configure_audio; configure_network; configure_bluetooth; configure_services; configure_login_manager; }
-
-# =============================================================================
-# 16. ÉTAPE 12 — VALIDATION ET RAPPORT
-# =============================================================================
-chk() {   # chk STATUT "libellé" "détail"
-  local st=$1 label=$2 detail=${3:-} col
-  case $st in PASS) col=$C_GRN; CHECK_PASS+=1;; WARN) col=$C_YEL; CHECK_WARN+=1;; FAIL) col=$C_RED; CHECK_FAIL+=1;; *) col=$C_DIM;; esac
-  CHECK_LINES+=("$(printf '[%-4s] %-38s %s' "$st" "$label" "$detail")")
-  log "CHECK $st $label — $detail"
-  printf '  %s[%-4s]%s %-38s %s%s%s\n' "$col" "$st" "$C_RST" "$label" "$C_DIM" "$detail" "$C_RST" >&3
-}
-chk_if() { if eval "$2"; then chk PASS "$1" "${3:-}"; else chk "${4:-FAIL}" "$1" "${5:-${3:-}}"; fi; }
-
-diagnose_summary() {
-  CHECK_LINES=(); CHECK_FAIL=0; CHECK_WARN=0; CHECK_PASS=0
-  chk PASS "Pré-vérifications système" "Distribution, architecture, réseau et espace disque"
-  chk PASS "Détection matérielle" "${CPU_MODEL:-CPU inconnu} · ${GPU_DRIVER:-pilote GPU non identifié}"
-  chk INFO "Installation non exécutée" "Les étapes 3 à 11 ont été volontairement ignorées en mode --diagnose."
-  chk INFO "Validation complète" "À effectuer après l'installation normale."
-}
-
-validate_installation() {
-  ui ""; ui "  ${C_B}Contrôles hors session graphique${C_RST}"
-  CHECK_LINES=(); CHECK_FAIL=0; CHECK_WARN=0; CHECK_PASS=0
-  chk_if "EndeavourOS détecté" '[[ $OS_ID == endeavouros ]]' "$OS_NAME" WARN
-  local hv; hv=$(Hyprland --version 2>/dev/null | head -1 || true)
-  chk_if "Hyprland 0.54.3 installé" '[[ $hv == *0.54.3* && $(pkg_version hyprland) == 0.54.3-* ]]' "${hv:-absent}"
-  local n bad=""
-  for n in "${PIN_ORDER[@]}"; do [[ $(pkg_version "$n") == "$(expected_pin_version "$n")" ]] || bad+="$n "; done
-  chk_if "Pile hypr* épinglée intacte" '[[ -z $bad && -f $PINS_LOCK ]]' "${#PIN_ORDER[@]} paquets" FAIL "dérive : ${bad:-verrou absent}"
-  local broken; broken=$(pin_broken_list | xargs)
-  chk_if "ABI de la pile (bibliothèques)" '[[ -z $broken ]]' "aucune bibliothèque manquante" FAIL "cassé : $broken"
-  chk_if "IgnorePkg (pacman.conf)" 'grep -q "^IgnorePkg = ${PIN_ORDER[*]}$" /etc/pacman.conf' "pile protégée de -Syu"
-  local vout; vout=$(Hyprland --verify-config -c "$CFG/hypr/hyprland.conf" 2>&1 || true)
-  log "verify-config : $vout"
-  chk_if "Configuration hyprlang valide" 'grep -qi "config ok" <<<"$vout"' "Hyprland --verify-config" FAIL "$(grep -im1 -E 'error|erreur' <<<"$vout" || echo 'voir journal')"
-  local rel; rel=$(cat "$CFG/illogical-impulse/hypr-installer-release" 2>/dev/null || true)
-  chk_if "End-4 release correcte" '[[ $rel == "$END4_TAG $END4_COMMIT" && -f $CFG/quickshell/ii/shell.qml ]]' "$END4_TAG ${END4_COMMIT:0:12}"
-  local qdiff; qdiff=$(diff -rq "$END4_DIR/dots/.config/quickshell" "$CFG/quickshell" 2>/dev/null | grep -v '^Only in' | head -3 || true)
   chk_if "Fichiers Quickshell identiques à la release" '[[ -z $qdiff ]]' "$CFG/quickshell" WARN "${qdiff:-}"
   local qsc; qsc=$(state_get quickshell.commit)
   chk_if "Quickshell installé" 'pkg_installed illogical-impulse-quickshell-git && command -v qs >/dev/null' "commit ${qsc:0:12}$([[ $qsc == "$QS_FALLBACK_COMMIT" ]] && echo ' (repli v0.3.0)')"
