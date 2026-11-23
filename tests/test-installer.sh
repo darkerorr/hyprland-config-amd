@@ -27,7 +27,8 @@ pacman() {
       ;;
     -Si)
       case ${2:-} in
-        cmake|gtest) return 0 ;;
+        cmake|gtest) printf 'Version : 1.2-1\n'; return 0 ;;
+        badver) printf 'Version : 1.0-1\n'; return 0 ;;
         *) return 1 ;;
       esac
       ;;
@@ -55,6 +56,12 @@ vercmp() {
     printf '%s' -1
   elif [[ $1 == 0.54.3-4 && $2 == 0.54.0 ]]; then
     printf '%s' 1
+  elif [[ $1 == 1.2-1 && $2 == 1.0 ]]; then
+    printf '%s' 1
+  elif [[ $1 == 1.2-1 && $2 == 2.0 ]]; then
+    printf '%s' -1
+  elif [[ $1 == 1.0-1 && $2 == 2.0 ]]; then
+    printf '%s' -1
   else
     printf '%s' 0
   fi
@@ -66,14 +73,19 @@ mkdir -p "$TEST_DIR/pkg"
 cat >"$TEST_DIR/srcinfo" <<'SRC'
 pkgbase = fixture
     depends = glibc
-    makedepends_x86_64 = cmake
-    checkdepends = gtest
+    makedepends_x86_64 = cmake>=1.0
+    checkdepends = gtest<2.0
     optdepends = optional-not-installed
 SRC
 MOCK_SRCINFO="$TEST_DIR/srcinfo"
 export MOCK_SRCINFO
 check_aur_dependencies "$TEST_DIR/pkg" fixture || fail "repo dependency preflight rejected available dependencies"
 pass "indented .SRCINFO and repository dependencies"
+dependency_version_satisfied "cmake>=1.0" "1.2-1" || fail "satisfied repository version constraint was rejected"
+if dependency_version_satisfied "cmake>=2.0" "1.2-1"; then
+  fail "unsatisfied repository version constraint was accepted"
+fi
+pass "repository version constraints"
 
 # AUR dependencies not already installed must be reported before makepkg -s.
 cat >"$TEST_DIR/srcinfo" <<'SRC'
@@ -94,6 +106,16 @@ if check_aur_dependencies "$TEST_DIR/pkg" fixture 3>&1 >/dev/null 2>&1; then
   fail "missing repository dependency was accepted"
 fi
 pass "missing repository dependency is rejected"
+
+# A repository package with an insufficient version must also be rejected.
+cat >"$TEST_DIR/srcinfo" <<'SRC'
+pkgbase = fixture
+    depends = badver>=2.0
+SRC
+if check_aur_dependencies "$TEST_DIR/pkg" fixture 3>&1 >/dev/null 2>&1; then
+  fail "insufficient repository package version was accepted"
+fi
+pass "insufficient repository package version is rejected"
 
 # Space Grotesk is provided by the verified local font install, not by an AUR package.
 cat >"$TEST_DIR/srcinfo" <<'SRC'
