@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.1.4"
+readonly INSTALLER_VERSION="1.1.5"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -1287,6 +1287,10 @@ install_quickshell() {
     ok "Quickshell déjà installé et compatible avec Qt"; return 0
   fi
   local used=$QS_COMMIT
+  local qcheck="$BUILD_DIR/meta/quickshell-preflight"
+  rm -rf -- "${qcheck:?}"; mkdir -p "$qcheck"
+  cp -a "$END4_DIR/sdata/dist-arch/illogical-impulse-quickshell-git/." "$qcheck/"
+  check_aur_dependencies "$qcheck" "illogical-impulse-quickshell-git" || die "Quickshell : dépendances de compilation non résolues."
   if ! build_quickshell "$QS_COMMIT"; then
     warn "Compilation du commit épinglé échouée avec la source officielle ; nouvel essai via le miroir GitHub (même commit)."
     if ! build_quickshell "$QS_COMMIT" "$QS_MIRROR_URL"; then
@@ -1854,6 +1858,7 @@ validate_installation() {
     command -v "$c" >/dev/null || miss+="$c "
   done
   chk_if "Outils requis par les widgets" '[[ -z $miss ]]' "tous présents" FAIL "manquants : $miss"
+  chk_if "Configuration KDE facultative" 'command -v kwriteconfig6 >/dev/null 2>&1' "kwriteconfig6" WARN
   chk_if "Session Wayland Hyprland" '[[ -f /usr/share/wayland-sessions/hyprland.desktop && -x /usr/bin/start-hyprland ]]' "hyprland.desktop -> start-hyprland"
   chk_if "Portails XDG" 'pkg_installed xdg-desktop-portal && [[ -f /usr/share/xdg-desktop-portal/portals/hyprland.portal && -f $CFG/xdg-desktop-portal/hyprland-portals.conf ]]' "hyprland + gtk + kde"
   chk_if "Polkit" 'pkg_installed polkit && ! pkg_installed hyprpolkitagent' "agent : Quickshell (PolkitService)"
