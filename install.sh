@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.2.4"
+readonly INSTALLER_VERSION="1.2.5"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -1122,13 +1122,24 @@ check_aur_dependencies() {
     dep=${line#*=}; dep=${dep# }
     pkg=${dep%%[<>=]*}
     [[ -n $pkg ]] || continue
-    pacman -T "$dep" >/dev/null 2>&1 && continue
     if [[ $pkg == otf-space-grotesk ]] && fc-match -f '%{family}\n' "Space Grotesk" | grep -qiF "Space Grotesk"; then
       continue
     elif is_pinned "$pkg"; then
+      local installed_version=""
+      pkg_installed "$pkg" && installed_version=$(pkg_version "$pkg")
+      if [[ -n $installed_version ]] && dependency_version_satisfied "$dep" "$installed_version"; then
+        continue
+      fi
       pinned_missing+=("$dep (paquet Hyprland épinglé absent ou version installée incompatible)")
     elif aur_provided "$pkg"; then
+      local installed_version=""
+      pkg_installed "$pkg" && installed_version=$(pkg_version "$pkg")
+      if [[ -n $installed_version ]] && dependency_version_satisfied "$dep" "$installed_version"; then
+        continue
+      fi
       aur_missing+=("$dep (dépendance AUR épinglée absente ou version installée incompatible)")
+    elif pacman -T "$dep" >/dev/null 2>&1; then
+      continue
     elif ! pacman -Si "$pkg" >/dev/null 2>&1; then
       unresolved+=("$dep")
     else
