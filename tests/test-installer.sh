@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../install.sh
+source "$ROOT_DIR/install.sh"
+
+TEST_DIR="$(mktemp -d)"
+trap 'rm -rf -- "$TEST_DIR"' EXIT
+
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+pass() { printf 'PASS: %s\n' "$*"; }
+
+makepkg() {
+  [[ ${1:-} == --printsrcinfo ]] || return 2
+  cat "$MOCK_SRCINFO"
+}
+
+pacman() {
+  case ${1:-} in
+    -T)
+      case ${2:-} in
+        glibc) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    -Si)
+      case ${2:-} in
+        cmake|gtest) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    -Qi)
+      case ${2:-} in
+        dependent-too-new)
+          printf 'Name : dependent-too-new\nDepends On : hyprland>=0.55.0\nRequired By : None\n'
+          ;;
+        dependent-compatible)
+          printf 'Name : dependent-compatible\nDepends On : hyprland>=0.54.0\nRequired By : None\n'
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+fc-match() { printf 'Space Grotesk\n'; }
+aur_provided() { [[ ${1:-} == songrec ]]; }
+warn() { printf 'WARN: %s\n' "$*" >&2; }
+expected_pin_version() { printf '%s' '0.54.3-4'; }
+vercmp() {
+  if [[ $1 == 0.54.3-4 && $2 == 0.55.0 ]]; then
+    printf '%s' -1
+  elif [[ $1 == 0.54.3-4 && $2 == 0.54.0 ]]; then
+    printf '%s' 1
+  else
+    printf '%s' 0
+  fi
+}
+
+mkdir -p "$TEST_DIR/pkg"
+
+# .SRCINFO properties are indented; required dependencies are parsed, optional ones ignored.
+cat >"$TEST_DIR/srcinfo" <<'SRC'
+pkgbase = fixture
+    depends = glibc
+    makedepends_x86_64 = cmake
+    checkdepends = gtest
+    optdepends = optional-not-installed
+SRC
+MOCK_SRCINFO="$TEST_DIR/srcinfo"
+export MOCK_SRCINFO
+check_aur_dependencies "$TEST_DIR/pkg" fixture || fail "repo dependency preflight rejected available dependencies"
+pass "indented .SRCINFO and repository dependencies"
+
+# AUR dependencies not already installed must be reported before makepkg -s.
+cat >"$TEST_DIR/srcinfo" <<'SRC'
+pkgbase = fixture
+    depends = songrec
+SRC
+if check_aur_dependencies "$TEST_DIR/pkg" fixture 3>&1 >/dev/null 2>&1; then
+  fail "missing pinned AUR dependency was accepted"
+fi
+pass "missing AUR dependency is rejected"
+
+# A dependency absent from configured repositories must be reported.
+cat >"$TEST_DIR/srcinfo" <<'SRC'
+pkgbase = fixture
+    depends = package-not-in-repo
+SRC
+if check_aur_dependencies "$TEST_DIR/pkg" fixture 3>&1 >/dev/null 2>&1; then
+  fail "missing repository dependency was accepted"
+fi
+pass "missing repository dependency is rejected"
+
+# Space Grotesk is provided by the verified local font install, not by an AUR package.
+cat >"$TEST_DIR/srcinfo" <<'SRC'
+pkgbase = fixture
+    depends = otf-space-grotesk
+SRC
+check_aur_dependencies "$TEST_DIR/pkg" fixture || fail "local Space Grotesk dependency was not recognized"
+pass "locally installed Space Grotesk dependency"
+
+package_requires_incompatible_pin dependent-too-new || fail "newer Hyprland constraint was missed"
+pass "incompatible reverse dependency detected"
+if package_requires_incompatible_pin dependent-compatible; then
+  fail "compatible Hyprland constraint was incorrectly rejected"
+fi
+pass "compatible reverse dependency preserved"
