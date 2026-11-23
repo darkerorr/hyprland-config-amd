@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="2.0.1"
+readonly INSTALLER_VERSION="2.0.2"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
 readonly CHECKPOINT_SCHEMA=2
 readonly MAIN_PID=$$
@@ -308,6 +308,7 @@ spin() {
   local command_text="$*" offset=0
   log "EXEC  $command_text"
   # Position du journal avant la commande : sa sortie exacte pourra être analysée.
+  case ${1:-} in sudo|makechrootpkg|mkarchroot|arch-nspawn) ensure_sudo ;; esac
   offset=$(stat -c %s "$LOG_FILE" 2>/dev/null || echo 0)
   LAST_CAUSE=""
   ( trap - ERR; "$@" ) >&5 2>&5 &
@@ -586,13 +587,26 @@ run_step() {
 # 4. OUTILS : sudo, pacman, fichiers gérés, sauvegardes
 # =============================================================================
 start_sudo_keepalive() {
-  if ! sudo -n true 2>/dev/null; then
-    printf '\n  Authentification administrateur (sudo) requise :\n' >&3
-    # shellcheck disable=SC2024  # l'invite sudo doit rester sur le terminal (voulu)
-    sudo -v </dev/tty >&3 2>&3 || die "Authentification sudo refusée."
-  fi
-  ( trap - ERR; while kill -0 "$MAIN_PID" 2>/dev/null; do sudo -n -v 2>/dev/null; sleep 45; done ) &
+  ensure_sudo
+  # set +e : un échec ponctuel de « sudo -n -v » ne doit pas tuer la boucle
+  # (sous set -e hérité, la 1re erreur arrêtait silencieusement le maintien).
+  ( set +e; trap - ERR; while kill -0 "$MAIN_PID" 2>/dev/null; do sudo -n -v 2>/dev/null; sleep 30; done ) &
   SUDO_KEEPALIVE_PID=$!
+}
+
+# Garantit des droits sudo valides AVANT de lancer une commande en arrière-plan.
+# Sinon sudo demanderait le mot de passe pendant que l'indicateur d'activité
+# l'efface de l'écran : invite invisible, puis « sudo: timed out reading password ».
+ensure_sudo() {
+  [[ $MODE == install || $MODE == repair ]] || return 0
+  sudo -n true 2>/dev/null && return 0
+  printf '\n  %sAuthentification administrateur (sudo) requise :%s\n' "$C_YEL" "$C_RST" >&3
+  local i
+  for i in 1 2 3; do
+    # shellcheck disable=SC2024  # l'invite sudo doit rester sur le terminal (voulu)
+    sudo -v </dev/tty >&3 2>&3 && return 0
+  done
+  die "Authentification sudo refusée."
 }
 
 pkg_installed() { pacman -Qq "$1" &>/dev/null; }
@@ -1173,9 +1187,10 @@ install_aur_packages() {
         || warn "Clé PGP de wlogout non récupérée : vérification par somme de contrôle seule."
     fi
     # --needed ne sert qu'avec makepkg -i ; les paquets sont installés séparément.
-    local -a mkflags=(-s -r --noconfirm -f -c --log)
+    install_build_deps "$dir" "$base"
+    local -a mkflags=(--noconfirm -f -c --log)
     [[ $base == wlogout ]] && ! gpg --list-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F &>/dev/null && mkflags+=(--skippgpcheck)
-    if ! (cd "$dir" && spin "AUR : $base (dépendances + compilation)" env LC_ALL=C makepkg "${mkflags[@]}"); then
+    if ! (cd "$dir" && spin "AUR : $base (compilation)" env LC_ALL=C makepkg "${mkflags[@]}"); then
       # La cause précise (paquet introuvable, conflit, échec de build…) est extraite par spin.
       LAST_CAUSE=$(explain_failure_output "$SPIN_OUTPUT_FILE" | head -n1)
       die "AUR $base : makepkg a échoué. ${LAST_CAUSE:-Voir les lignes affichées ci-dessus.}"
@@ -1635,6 +1650,26 @@ check_aur_dependencies() {
   return 0
 }
 
+# Installe NOUS-MÊMES (sudo au premier plan, pacman gardé) les dépendances de
+# compilation lues dans le .SRCINFO, puis makepkg est lancé SANS -s : il
+# n'appelle donc jamais sudo en arrière-plan. Si une dépendance manque encore,
+# makepkg s'arrête avec un message clair au lieu d'attendre un mot de passe.
+install_build_deps() {   # install_build_deps <dossier contenant .SRCINFO> <nom>
+  local dir=$1 base=$2 dep pkg
+  local -a deps=() repo=() unbuildable=()
+  [[ -f $dir/.SRCINFO ]] || (cd "$dir" && makepkg --printsrcinfo) >"$dir/.SRCINFO" \
+    || die "$base : génération de .SRCINFO impossible."
+  mapfile -t deps < <(awk -F' = ' '/^[[:space:]]*(depends|makedepends|checkdepends)(_x86_64)? = /{print $2}' "$dir/.SRCINFO" | xargs -n1 | sort -u)
+  ((${#deps[@]})) || return 0
+  while IFS= read -r dep; do
+    [[ -n $dep ]] || continue
+    pkg=${dep%%[<>=]*}
+    if is_pinned "$pkg" || aur_provided "$pkg" || [[ $pkg == otf-space-grotesk ]]; then unbuildable+=("$dep"); else repo+=("$dep"); fi
+  done < <(pkgs_missing "${deps[@]}")
+  ((${#unbuildable[@]} == 0)) || die "$base : dépendances non installables depuis les dépôts : ${unbuildable[*]}"
+  ((${#repo[@]} == 0)) || pac_install --asdeps "${repo[@]}"
+}
+
 install_end4_metas() {
   local m dir d bdir f
   local -a deps repo files
@@ -1668,7 +1703,8 @@ install_end4_metas() {
     pac_install --asdeps "${repo[@]}"
     bdir="$BUILD_DIR/meta/illogical-impulse-$m"
     rm -rf -- "${bdir:?}"; mkdir -p "$bdir"; cp -a "$dir/." "$bdir/"
-    if ! (cd "$bdir" && spin "end-4 : illogical-impulse-$m" env LC_ALL=C makepkg -Afs --noconfirm); then
+    install_build_deps "$bdir" "illogical-impulse-$m"
+    if ! (cd "$bdir" && spin "end-4 : illogical-impulse-$m" env LC_ALL=C makepkg -Af --noconfirm); then
       if [[ $END4_OPTIONAL_METAS == *" $m "* ]]; then warn "illogical-impulse-$m non compilé (fonction secondaire : rendu LaTeX du panneau IA)."; continue; fi
       LAST_CAUSE=$(explain_failure_output "$SPIN_OUTPUT_FILE" | head -n1)
       die "Échec de compilation du méta-paquet end-4 $m. ${LAST_CAUSE:-Voir les lignes affichées ci-dessus.}"
@@ -1783,7 +1819,8 @@ build_quickshell() {
   grep -q "^_commit='$QS_COMMIT'" "$bdir/PKGBUILD" || die "PKGBUILD Quickshell end-4 inattendu (commit épinglé différent)"
   [[ $commit != "$QS_COMMIT" ]] && sed -i "s/^_commit=.*/_commit='$commit'/" "$bdir/PKGBUILD"
   [[ -n $url ]] && sed -i "s#^url=.*#url='${url%.git}'#" "$bdir/PKGBUILD"
-  (cd "$bdir" && spin "Compilation de Quickshell ${commit:0:12}" env LC_ALL=C makepkg -Afs --noconfirm)
+  install_build_deps "$bdir" "illogical-impulse-quickshell-git"
+  (cd "$bdir" && spin "Compilation de Quickshell ${commit:0:12}" env LC_ALL=C makepkg -Af --noconfirm)
 }
 
 install_quickshell() {

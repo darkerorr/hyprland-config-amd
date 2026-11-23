@@ -180,10 +180,15 @@ if [[ -s $MOCK/fail-makepkg-$base ]]; then
   echo "==> ERROR: '"'"'pacman'"'"' failed to install missing dependencies."
   exit 8
 fi
-if [[ " $* " == *" -s "* || " $* " == *" -Afs "* || " $* " == *" -sr"* ]]; then
-  deps=$( source ./PKGBUILD >/dev/null 2>&1; printf "%s\n" "${depends[@]}" "${makedepends[@]}" )
-  miss=$(pacman -T $deps || true)
+deps=$( source ./PKGBUILD >/dev/null 2>&1; printf "%s\n" "${depends[@]}" "${makedepends[@]}" )
+miss=$(pacman -T $deps || true)
+if [[ " $* " =~ \ -[A-Za-z]*s ]]; then
+  # makepkg -s : appellerait sudo en arrière-plan (comportement interdit, signalé).
+  echo "MAKEPKG_SYNCDEPS $base" >>"$MOCK/forbidden.log"
   if [[ -n $miss ]]; then pacman -S --asdeps --noconfirm $miss || { echo "==> ERROR: '"'"'pacman'"'"' failed to install missing dependencies."; exit 8; }; fi
+elif [[ -n $miss && " $* " != *" -d "* ]]; then
+  echo "==> Missing dependencies:"; for m in $miss; do echo "  -> $m"; done
+  echo "==> ERROR: Could not resolve all dependencies."; exit 15
 fi
 while read -r f; do
   echo "pkg" >"$f"
@@ -358,7 +363,7 @@ check "S1 points de reprise 3 à 11 écrits" bash -c "for i in 3 4 5 6 7 8 9 10 
 check "S1 aucun échec enregistré" bash -c "! ls '$STATE'/step-*.failed 2>/dev/null | grep -q ."
 check "S1 rapport généré" test -f "$H/.local/share/hypr-installer/reports/latest-install.txt"
 check "S1 validation sans échec" grep -q 'Installation terminée\.' "$OUT"
-check "S1 aucune commande disque/chargeur de démarrage" test ! -s "$MOCK/forbidden.log"
+check "S1 aucune commande disque/chargeur de démarrage, jamais makepkg -s" test ! -s "$MOCK/forbidden.log"
 check "S1 jamais de redémarrage automatique avec --yes" bash -c "! grep -q 'systemctl reboot' '$MOCK/calls.log'"
 
 # =============================================================================
@@ -394,7 +399,7 @@ pkgs_before=$(ls "$MOCK/db" | wc -l)
 run_installer --yes
 check "S3 reprise après correction : code 0" test "$RC" -eq 0
 ((RC == 0)) || show_out
-check "S3 reprise : AUR déjà compilés non recompilés" test "$(calls '^makepkg .*-s -r')" -eq 1
+check "S3 reprise : AUR déjà compilés non recompilés" test "$(calls '^makepkg --noconfirm -f -c --log')" -eq 1
 check "S3 reprise : enregistrement d'échec effacé" test ! -f "$STATE/step-3.failed"
 check "S3 paquets présents avant la reprise conservés" test "$(ls "$MOCK/db" | wc -l)" -ge "$pkgs_before"
 
@@ -452,7 +457,7 @@ check "S7 hyprgraphics recompilé en chroot" test "$(calls '^makechrootpkg')" -g
 check "S7 hyprgraphics réinstallé à la bonne version" test "$(inst_ver hyprgraphics)" = "${PIN_VER[hyprgraphics]}.1"
 check "S7 état pins.force-src nettoyé" test ! -f "$STATE/pins.force-src"
 check "S7 pile déjà installée : IgnorePkg actif PENDANT -Syu" grep -q '^IgnorePkg' "$MOCK/pacman.conf.at-syu"
-check "S7 réparation : AUR intacts non recompilés" test "$(calls '^makepkg .*-s -r')" -eq 0
+check "S7 réparation : AUR intacts non recompilés" test "$(calls '^makepkg --noconfirm -f -c --log')" -eq 0
 rm -f "$MOCK/syu-block"
 
 # =============================================================================
@@ -482,7 +487,7 @@ echo scdoc >"$MOCK/norepo"
 run_installer --yes
 check "S9 dépendance absente : arrêt contrôlé" test "$RC" -eq 1
 check "S9 dépendance nommée dans le message" grep -q 'scdoc' "$OUT"
-check "S9 makepkg non lancé pour wlogout" bash -c "! grep -q '^makepkg -s -r.*@wlogout$' '$MOCK/calls.log'"
+check "S9 makepkg non lancé pour wlogout" bash -c "! grep -q '^makepkg --noconfirm.*@wlogout$' '$MOCK/calls.log'"
 
 echo
 echo "Résultat : $PASS réussis, $FAILN échoués"

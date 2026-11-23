@@ -47,6 +47,10 @@ jobs:
           if grep -nE '^[[:space:]]*"(html2markdown|38c3-styles)[|]' install.sh; then
             echo "Unwanted HTML conversion AUR package remains in installer"; exit 1
           fi
+          # makepkg must never install dependencies itself (hidden background sudo prompt).
+          if grep -nE '^[^#]*makepkg[^|#]* (-[A-Za-z]*s[A-Za-z]*|--syncdeps)( |\)|$)' install.sh; then
+            echo "makepkg -s found"; exit 1
+          fi
           if grep -nE 'makepkg .*--needed' install.sh; then
             echo "--needed must only be used by makepkg with --install"; exit 1
           fi
@@ -62,5 +66,5 @@ jobs:
 
       - name: Safe CLI smoke tests
         run: |
-          test "$(./install.sh --version)" = "2.0.1"
+          test "$(./install.sh --version)" = "2.0.2"
           ./install.sh --help >/dev/null
