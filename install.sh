@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.0.2"
+readonly INSTALLER_VERSION="1.0.3"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -106,8 +106,6 @@ readonly LOCAL_REL_SUFFIX=".1"   # pkgrel local des reconstructions : 0.5.1-2 ->
 # --- Paquets AUR requis par end-4, épinglés au commit AUR audité ------------
 #     format : pkgbase|commit|paquets à installer (séparés par des virgules)
 readonly -a AUR_PINS=(
-  "html2markdown|46785423a542244c523fb48f7e7741dc1c5b99b1|html2markdown"
-  "38c3-styles|2b88791111d999c9e14b8dab650f5424333d95ee|otf-space-grotesk"
   "adw-gtk-theme-git|16fdc46376a5c1f758b2a1fc372be741c1931f26|adw-gtk-theme-git"
   "breeze-plus|faf39cfda93ef93a4514e36674bcf5dcb80d3164|breeze-plus"
   "darkly-bin|ee494461ecac9f1862c936afc7fd20bf072c3250|darkly-bin"
@@ -129,7 +127,7 @@ readonly -a BASE_PKGS=(
   xdg-user-dirs xdg-utils polkit dconf kconfig plasma-integration
   kitty dolphin qalculate-qt plasma-systemmonitor easyeffects wev
   grim slurp wl-clipboard cliphist brightnessctl playerctl libnotify
-  tesseract-data-fra fontforge python-html2text
+  tesseract-data-fra
 )
 readonly -a GRAPHICS_PKGS=(mesa vulkan-radeon vulkan-icd-loader libva-utils vulkan-tools mesa-utils linux-firmware-amdgpu pciutils)
 readonly -a AUDIO_PKGS=(pipewire pipewire-alsa pipewire-pulse wireplumber alsa-utils pavucontrol-qt)
@@ -148,6 +146,8 @@ readonly REPORT_DIR="$DATA_DIR/reports" MANIFEST_DIR="$DATA_DIR/manifests" BIN_D
 readonly END4_DIR="$DATA_DIR/end4"
 readonly CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/hypr-installer"
 readonly PKG_CACHE="$CACHE_DIR/pkgs" BUILD_DIR="$CACHE_DIR/build" CHROOT_DIR="$CACHE_DIR/chroot"
+readonly SPACE_GROTESK_URL="https://events.ccc.de/congress/2024/infos/styleguide/38c3-styleguide-full-v2.zip"
+readonly SPACE_GROTESK_SHA256="9ae65abcfc85c97a95bf64e70e9f5a0aba7948eea1d56a5a99a5feed727f5216"
 readonly CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
 readonly HYPR_CUSTOM="$CFG/hypr/custom"
 readonly VENV_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/quickshell/.venv"
@@ -733,6 +733,7 @@ install_system_packages() {
   for b in firefox chromium google-chrome-stable brave zen-browser librewolf microsoft-edge-stable; do command -v "$b" >/dev/null && found=1; done
   ((found)) || pac_install firefox
   install_aur_packages
+  install_space_grotesk_font
 }
 
 install_aur_packages() {
@@ -749,15 +750,6 @@ install_aur_packages() {
       gpg --keyserver hkps://keys.openpgp.org --recv-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F \
         || gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F \
         || warn "Clé PGP de wlogout non récupérée : vérification par somme MD5 seule."
-    fi
-    if [[ $base == 38c3-styles ]]; then
-      # 38c3-styles uses these tools in its shared build() function.
-      # html2markdown is built from AUR earlier; the other two are official packages.
-      local missing_tools=() tool
-      for tool in html2markdown html2text fontforge; do
-        command -v "$tool" >/dev/null 2>&1 || missing_tools+=("$tool")
-      done
-      (( ${#missing_tools[@]} == 0 )) || die "38c3-styles : dépendances de compilation absentes : ${missing_tools[*]}. Vérifiez html2markdown, python-html2text et fontforge."
     fi
     # --needed ne sert qu'avec makepkg -i ; les paquets sont installés séparément.
     local -a mkflags=(-s -r --noconfirm -f -c --log)
@@ -776,6 +768,37 @@ install_aur_packages() {
     [[ $base == html2markdown ]] && sudo pacman -D --asdeps html2markdown >/dev/null
   done
   return 0
+}
+
+# Space Grotesk is the only artifact needed from 38c3-styles.
+# Install the font files directly: no split AUR package or HTML converters.
+install_space_grotesk_font() {
+  local archive="$BUILD_DIR/38c3-styleguide-full-v2.zip"
+  local extract="$TMP_DIR/38c3-styleguide"
+  local font_dir="$extract/fonts/space-grotesk-1.1.4"
+  local target="${XDG_DATA_HOME:-$HOME/.local/share}/fonts/space-grotesk"
+  local -a fonts=()
+
+  mkdir -p "$BUILD_DIR"
+  if [[ ! -f $archive ]] || ! sha256sum -c --status <<<"$SPACE_GROTESK_SHA256  $archive"; then
+    rm -f -- "$archive.part"
+    spin "Téléchargement de Space Grotesk" curl -fL --retry 3 --max-time 300 -o "$archive.part" "$SPACE_GROTESK_URL"
+    sha256sum -c --status <<<"$SPACE_GROTESK_SHA256  $archive.part" || die "Archive 38C3 invalide : somme SHA-256 incorrecte."
+    mv -f -- "$archive.part" "$archive"
+  fi
+  sha256sum -c --status <<<"$SPACE_GROTESK_SHA256  $archive" || die "Archive 38C3 invalide : somme SHA-256 incorrecte."
+
+  mkdir -p "$extract"
+  unzip -q "$archive" -d "$extract"
+  [[ -d $font_dir/otf && -f $font_dir/OFL.txt ]] || die "Archive 38C3 : dossier Space Grotesk ou licence OFL introuvable."
+  fonts=("$font_dir"/otf/*.otf)
+  (( ${#fonts[@]} > 0 )) && [[ -f ${fonts[0]} ]] || die "Archive 38C3 : aucun fichier OTF Space Grotesk trouvé."
+
+  mkdir -p "$target"
+  install -m 644 "${fonts[@]}" "$target/"
+  install -m 644 "$font_dir/OFL.txt" "$target/OFL.txt"
+  spin "Actualisation du cache des polices" fc-cache -f "$target"
+  ok "Space Grotesk installé depuis l'archive 38C3 vérifiée (sans dépendance AUR)."
 }
 
 # =============================================================================
