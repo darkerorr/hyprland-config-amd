@@ -2,11 +2,12 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=../install.sh
-source "$ROOT_DIR/install.sh"
-
 TEST_DIR="$(mktemp -d)"
 trap 'rm -rf -- "$TEST_DIR"' EXIT
+export HOME="$TEST_DIR/home"
+mkdir -p "$HOME"
+# shellcheck source=../install.sh
+source "$ROOT_DIR/install.sh"
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass() { printf 'PASS: %s\n' "$*"; }
@@ -108,3 +109,20 @@ if package_requires_incompatible_pin dependent-compatible; then
   fail "compatible Hyprland constraint was incorrectly rejected"
 fi
 pass "compatible reverse dependency preserved"
+
+# A repair run must be allowed to reach the pinned-package restoration step.
+mkdir -p "$(dirname -- "$PINS_LOCK")"
+: >"$PINS_LOCK"
+MODE=repair
+PINS_RESTORED=0
+pkg_version() { printf '%s' '0.99-1'; }
+expected_pin_version() { printf '%s' '0.54.3-4'; }
+log() { :; }
+die() { return 42; }
+assert_pins_intact || fail "repair mode stopped before restoring the pinned stack"
+pass "repair mode defers pin-lock validation until restoration"
+PINS_RESTORED=1
+if assert_pins_intact; then
+  fail "pin drift was accepted after restoration"
+fi
+pass "pin drift is rejected after restoration"
