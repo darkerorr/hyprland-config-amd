@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.1.8"
+readonly INSTALLER_VERSION="1.1.9"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -745,6 +745,9 @@ remove_installer_ignorepkg() {
 
 
 install_system_packages() {
+  # Retirer d'abord les paquets installés qui exigent une version incompatible
+  # avec la pile cible, sinon pacman -Syu peut refuser de résoudre la transaction.
+  remove_incompatible_dependents
   # Mettre tout le système à jour sans conserver d'anciens IgnorePkg gérés par
   # l'installateur ; la pile Hyprland épinglée sera réinstallée à l'étape 05.
   remove_installer_ignorepkg
