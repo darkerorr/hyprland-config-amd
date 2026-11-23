@@ -232,21 +232,28 @@ draw_dashboard() {
   if [[ -t 3 ]]; then printf '\e[H\e[2J' >&3; fi
   banner
   ui ""
-  local i
+  printf '  %s╭──────────────────────────────────────────────────────────────╮%s\n' "$C_DIM" "$C_RST" >&3
+  printf '  %s│%s  %sPROGRESSION DE L’INSTALLATION%s                               %s│%s\n' "$C_DIM" "$C_RST" "$C_B" "$C_RST" "$C_DIM" "$C_RST" >&3
+  printf '  %s╰──────────────────────────────────────────────────────────────╯%s\n' "$C_DIM" "$C_RST" >&3
+  local i done_count=0
   for i in $(seq 1 12); do
-    printf ' [%02d/12] %-27s %s\n' "$i" "${STEP_TITLES[i]}" "$(status_label "${STEP_STATUS[i]}")" >&3
+    case ${STEP_STATUS[i]} in DONE|CACHED|WARN) ((done_count+=1)) ;; esac
+  done
+  printf '  %sÉtapes terminées :%s %s/12\n\n' "$C_DIM" "$C_RST" "$done_count" >&3
+  for i in $(seq 1 12); do
+    printf '  %s%02d%s  %-29s %s\n' "$C_DIM" "$i" "$C_RST" "${STEP_TITLES[i]}" "$(status_label "${STEP_STATUS[i]}")" >&3
   done
   ui ""
-  ui "----------------------------------------------------"
-  ui " Installation log: ${LOG_FILE/#$HOME/\~}"
-  ui "----------------------------------------------------"
+  printf '  %sJournal%s  %s\n' "$C_B" "$C_RST" "${LOG_FILE/#$HOME/\~}" >&3
+  printf '  %s──────────────────────────────────────────────────────────────%s\n' "$C_DIM" "$C_RST" >&3
 }
 
 # Exécute une commande (externe ou fonction autonome) avec sortie dans le journal
 # et un indicateur d'activité à l'écran. Renvoie le code de sortie réel.
 spin() {
   local msg=$1; shift
-  log "EXEC  $*"
+  local command_text="$*"
+  log "EXEC  $command_text"
   ( trap - ERR; "$@" ) >&5 2>&5 &
   SPIN_PID=$!
   # shellcheck disable=SC1003  # la barre oblique inverse est une image du spinner
@@ -263,7 +270,25 @@ spin() {
   wait "$SPIN_PID" || rc=$?
   SPIN_PID=""
   [[ -t 3 ]] && printf '\r\e[K' >&3
-  if ((rc == 0)); then ok "$msg"; else log "ÉCHEC ($rc) : $msg"; fi
+  if ((rc == 0)); then
+    ok "$msg"
+  else
+    log "ÉCHEC ($rc) : $msg"
+    printf '\n  %s✖ Échec :%s %s (code %s)\n' "$C_RED" "$C_RST" "$msg" "$rc" >&3
+    if [[ $command_text == *makepkg* ]]; then
+      case $rc in
+        8) printf '  %sCause makepkg : installation des dépendances de compilation impossible.%s\n' "$C_YEL" "$C_RST" >&3 ;;
+        4) printf '  %sCause makepkg : une fonction du PKGBUILD a échoué.%s\n' "$C_YEL" "$C_RST" >&3 ;;
+        5) printf '  %sCause makepkg : création du paquet impossible.%s\n' "$C_YEL" "$C_RST" >&3 ;;
+        6) printf '  %sCause makepkg : source ou fichier auxiliaire manquant.%s\n' "$C_YEL" "$C_RST" >&3 ;;
+        12) printf '  %sCause makepkg : erreur de syntaxe dans le PKGBUILD.%s\n' "$C_YEL" "$C_RST" >&3 ;;
+        *) printf '  %sConsultez les dernières lignes ci-dessous pour la cause précise.%s\n' "$C_DIM" "$C_RST" >&3 ;;
+      esac
+    fi
+    printf '  %sDétails récents du journal :%s\n' "$C_DIM" "$C_RST" >&3
+    tail -n 28 "$LOG_FILE" 2>/dev/null | sed 's/^/    /' >&3
+    printf '\n' >&3
+  fi
   return "$rc"
 }
 
@@ -719,9 +744,12 @@ install_aur_packages() {
         || gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F \
         || warn "Clé PGP de wlogout non récupérée : vérification par somme MD5 seule."
     fi
-    local -a mkflags=(-s -r --noconfirm --needed -f -c)
+    # --needed ne sert qu'avec makepkg -i ; les paquets sont installés séparément.
+    local -a mkflags=(-s -r --noconfirm -f -c --log)
     [[ $base == wlogout ]] && ! gpg --list-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F &>/dev/null && mkflags+=(--skippgpcheck)
-    (cd "$dir" && spin "AUR : compilation de $base" makepkg "${mkflags[@]}")
+    if ! (cd "$dir" && spin "AUR : $base (dépendances + compilation)" env LC_ALL=C makepkg "${mkflags[@]}"); then
+      die "AUR $base : makepkg a échoué. Code 8 = dépendances de compilation impossibles à installer ; détails affichés ci-dessus et conservés dans le journal."
+    fi
     files=()
     for want in ${wants//,/ }; do
       while IFS= read -r f; do
@@ -1592,6 +1620,14 @@ chk() {   # chk STATUT "libellé" "détail"
 }
 chk_if() { if eval "$2"; then chk PASS "$1" "${3:-}"; else chk "${4:-FAIL}" "$1" "${5:-${3:-}}"; fi; }
 
+diagnose_summary() {
+  CHECK_LINES=(); CHECK_FAIL=0; CHECK_WARN=0; CHECK_PASS=0
+  chk PASS "Pré-vérifications système" "Distribution, architecture, réseau et espace disque"
+  chk PASS "Détection matérielle" "${CPU_MODEL:-CPU inconnu} · ${GPU_DRIVER:-pilote GPU non identifié}"
+  chk INFO "Installation non exécutée" "Les étapes 3 à 11 ont été volontairement ignorées en mode --diagnose."
+  chk INFO "Validation complète" "À effectuer après l'installation normale."
+}
+
 validate_installation() {
   ui ""; ui "  ${C_B}Contrôles hors session graphique${C_RST}"
   CHECK_LINES=(); CHECK_FAIL=0; CHECK_WARN=0; CHECK_PASS=0
@@ -1829,8 +1865,10 @@ main() {
     run_step 2 detect_hardware
     local i; for i in 3 4 5 6 7 8 9 10 11; do STEP_STATUS[i]=SKIPPED; done
     CURRENT_DM=${CURRENT_DM:-}
-    run_step 12 validate_installation generate_report
-    exit $((CHECK_FAIL > 0))
+    # Le diagnostic ne réalise aucune installation : ne pas valider les fichiers
+    # et paquets que les étapes volontairement ignorées doivent créer.
+    run_step 12 diagnose_summary generate_report
+    exit 0
   fi
 
   run_step 1 preflight resolve_versions confirm_plan
