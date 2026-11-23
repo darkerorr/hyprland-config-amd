@@ -44,6 +44,8 @@ jobs:
           grep -q 'check_aur_dependencies "$dir" "illogical-impulse-$m"' install.sh
           grep -q 'check_aur_dependencies "$qcheck" "illogical-impulse-quickshell-git"' install.sh
           grep -q 'pacman -T "$dep"' install.sh
+          grep -q 'dependency_version_satisfied "$dep" "$repo_version"' install.sh
+          grep -q 'insufficient repository package version' tests/test-installer.sh
           grep -q 'package_requires_incompatible_pin "$d"' install.sh
           grep -q 'vercmp "$actual" "$required"' install.sh
           grep -q 'target_pin_version "$n"' install.sh
@@ -70,5 +72,5 @@ jobs:
 
       - name: Safe CLI smoke tests
         run: |
-          test "$(./install.sh --version)" = "1.1.9"
+          test "$(./install.sh --version)" = "1.2.2"
           ./install.sh --help >/dev/null
