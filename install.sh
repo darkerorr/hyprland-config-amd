@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.2.8"
+readonly INSTALLER_VERSION="1.2.9"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -945,7 +945,6 @@ remove_incompatible_dependents() {
     for d in $(LC_ALL=C pacman -Qi "$n" | awk -F': ' '/^Required By/{print $2}'); do
       [[ $d == None ]] && continue
       is_pinned "$d" && continue
-      [[ $d == illogical-impulse-* || $d == hyprshot ]] && continue
       deps+=("$d")
     done
   done
