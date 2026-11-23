@@ -45,6 +45,7 @@ jobs:
           grep -q 'pacman -T "$dep"' install.sh
           grep -q 'package_requires_incompatible_pin "$d"' install.sh
           grep -q 'vercmp "$actual" "$required"' install.sh
+          grep -q 'target_pin_version "$n"' install.sh
           grep -Fq "printf '%s\\n'" install.sh
           grep -Fq "^[[:space:]]*(depends|makedepends|checkdepends)" install.sh
           if grep -nE 'makepkg .*--needed' install.sh; then
@@ -64,5 +65,5 @@ jobs:
 
       - name: Safe CLI smoke tests
         run: |
-          test "$(./install.sh --version)" = "1.1.3"
+          test "$(./install.sh --version)" = "1.1.4"
           ./install.sh --help >/dev/null
