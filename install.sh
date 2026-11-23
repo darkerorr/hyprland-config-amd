@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="2.0.0"
+readonly INSTALLER_VERSION="2.0.1"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
 readonly CHECKPOINT_SCHEMA=2
 readonly MAIN_PID=$$
@@ -875,9 +875,10 @@ preflight() {
   # miroir GitHub officiel utilisé automatiquement en secours.
   local host
   for host in https://archive.archlinux.org https://github.com https://gitlab.archlinux.org; do
-    curl -fsS --max-time 20 -o /dev/null -I "$host" || die "Réseau : $host injoignable. Connexion Internet requise."
+    net_reachable "$host" \
+      || die "Réseau : ${host#https://} ne répond pas (${NET_LAST_ERROR:-aucune réponse}). Testez : curl -v $host"
   done
-  if curl -fsS --max-time 20 -o /dev/null -I https://aur.archlinux.org; then
+  if net_reachable https://aur.archlinux.org; then
     ok "Réseau : dépôts Arch, Archive, AUR, GitHub joignables"
   else
     warn "AUR injoignable : les paquets AUR épinglés seront récupérés via le miroir GitHub officiel (mêmes commits)."
@@ -895,6 +896,46 @@ preflight() {
   fi
   if pkg_installed uwsm; then warn "uwsm est installé : à l’écran de connexion, choisissez « Hyprland » et NON « Hyprland (uwsm-managed) »."; fi
   return 0
+}
+
+# --- Réseau -------------------------------------------------------------------
+# Un serveur est « joignable » dès qu'il renvoie une réponse HTTP, quel que soit
+# son code : une page d'accueil en 403/404/405 (fréquent en HEAD sur les serveurs
+# Arch) prouve que le réseau fonctionne. Seule l'absence totale de réponse
+# (DNS, connexion, TLS, délai) est un échec réseau. En cas d'échec, un second
+# essai force l'IPv4 (IPv6 annoncé mais non routé : cas courant sur les box).
+NET_LAST_ERROR=""
+CURL_IPV4=()   # rempli avec -4 si seul l'IPv4 fonctionne
+http_status() {   # http_status <url> [options curl…] -> code HTTP (000 si aucune réponse)
+  local url=$1; shift
+  curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 15 --max-time 40 --retry 2 --retry-delay 2 \
+    -A "hypr-installer/$INSTALLER_VERSION" "$@" "$url" 2>"${TMP_DIR:-/tmp}/curl.err" || true
+}
+net_reachable() {   # net_reachable <url> : 0 si le serveur répond (n'importe quel code HTTP)
+  local url=$1 code
+  NET_LAST_ERROR=""
+  code=$(http_status "$url" "${CURL_IPV4[@]}")
+  [[ $code =~ ^[1-5][0-9][0-9]$ ]] && { log "Réseau : $url -> HTTP $code"; return 0; }
+  if ((${#CURL_IPV4[@]} == 0)); then
+    code=$(http_status "$url" -4)
+    if [[ $code =~ ^[1-5][0-9][0-9]$ ]]; then
+      log "Réseau : $url joignable uniquement en IPv4 (HTTP $code) : IPv4 forcé pour la suite"
+      CURL_IPV4=(-4); return 0
+    fi
+  fi
+  NET_LAST_ERROR=$(tail -n1 "${TMP_DIR:-/tmp}/curl.err" 2>/dev/null)
+  log "Réseau : $url injoignable : ${NET_LAST_ERROR:-aucune réponse}"
+  return 1
+}
+# Un fichier précis existe-t-il ? (HEAD puis GET partiel, redirections suivies)
+url_exists() {
+  local code
+  code=$(http_status "$1" "${CURL_IPV4[@]}" -L -I)
+  [[ $code == 2* ]] && return 0
+  code=$(http_status "$1" "${CURL_IPV4[@]}" -L -r 0-0)
+  [[ $code == 2* ]] && return 0
+  NET_LAST_ERROR="HTTP $code $(tail -n1 "${TMP_DIR:-/tmp}/curl.err" 2>/dev/null)"
+  return 1
 }
 
 # Verrou pacman : un verrou laissé par une transaction interrompue empêche toute
@@ -927,7 +968,7 @@ resolve_versions() {
   local n url
   for n in "${PIN_ORDER[@]}"; do
     url="$ALA_URL/${n:0:1}/$n/$n-${PIN_VER[$n]}-x86_64.pkg.tar.zst"
-    curl -fsS --max-time 30 -o /dev/null -I "$url" || die "Paquet épinglé indisponible : $url"
+    url_exists "$url" || die "Paquet épinglé indisponible dans l’Arch Linux Archive : $url (${NET_LAST_ERROR:-?})"
   done
   ok "Pile Hyprland épinglée disponible dans l’Arch Linux Archive (${#PIN_ORDER[@]} paquets)"
   local repo_hypr qt
@@ -1168,7 +1209,7 @@ install_space_grotesk_font() {
     mkdir -p "$BUILD_DIR"
     if [[ ! -f $archive ]] || ! sha256sum -c --status <<<"$SPACE_GROTESK_SHA256  $archive"; then
       rm -f -- "$archive.part"
-      spin "Téléchargement de Space Grotesk (archive 38C3)" curl -fL --retry 3 --max-time 300 -o "$archive.part" "$SPACE_GROTESK_URL" \
+      spin "Téléchargement de Space Grotesk (archive 38C3)" curl -fL "${CURL_IPV4[@]}" --retry 3 --retry-delay 3 --connect-timeout 20 --max-time 600 -o "$archive.part" "$SPACE_GROTESK_URL" \
         || die "Téléchargement de l’archive 38C3 impossible (${LAST_CAUSE:-voir journal})."
       sha256sum -c --status <<<"$SPACE_GROTESK_SHA256  $archive.part" || { rm -f -- "$archive.part"; die "Archive 38C3 invalide : somme SHA-256 incorrecte."; }
       mv -f -- "$archive.part" "$archive"
@@ -1247,14 +1288,14 @@ ala_fetch() {   # télécharge + vérifie séparément l'archive et sa signature
   mkdir -p "$PKG_CACHE/ala"
   if [[ ! -f $dest ]] || ! sha256sum -c --status <<<"${PIN_SHA256[$n]}  $dest"; then
     rm -f -- "$dest.part"
-    curl -fL --retry 3 --max-time 600 -o "$dest.part" "$url" || { rm -f -- "$dest.part"; die "Téléchargement impossible : $fn"; }
+    curl -fL "${CURL_IPV4[@]}" --retry 3 --retry-delay 3 --connect-timeout 20 --max-time 900 -o "$dest.part" "$url" || { rm -f -- "$dest.part"; die "Téléchargement impossible : $fn"; }
     sha256sum -c --status <<<"${PIN_SHA256[$n]}  $dest.part" || { rm -f -- "$dest.part"; die "SHA-256 invalide pour $fn"; }
     mv -f -- "$dest.part" "$dest"
   fi
   # Une archive valide en cache ne garantit pas que son .sig soit encore présent.
   if [[ ! -s $dest.sig ]]; then
     rm -f -- "$dest.sig.part"
-    curl -fL --retry 3 --max-time 60 -o "$dest.sig.part" "$url.sig" || { rm -f -- "$dest.sig.part"; die "Signature Arch introuvable pour $fn"; }
+    curl -fL "${CURL_IPV4[@]}" --retry 3 --retry-delay 3 --connect-timeout 20 --max-time 120 -o "$dest.sig.part" "$url.sig" || { rm -f -- "$dest.sig.part"; die "Signature Arch introuvable pour $fn"; }
     [[ -s $dest.sig.part ]] || die "Signature Arch vide pour $fn"
     mv -f -- "$dest.sig.part" "$dest.sig"
   fi
@@ -2396,10 +2437,10 @@ diagnose_prereqs() {
   else chk PASS "Verrou pacman" "libre"; fi
   local host net=1
   for host in https://archive.archlinux.org https://github.com https://gitlab.archlinux.org; do
-    if curl -fsS --max-time 15 -o /dev/null -I "$host" 2>/dev/null; then chk PASS "Réseau : ${host#https://}" "joignable"
-    else chk FAIL "Réseau : ${host#https://}" "injoignable (indispensable à l’installation)"; net=0; fi
+    if net_reachable "$host"; then chk PASS "Réseau : ${host#https://}" "joignable${CURL_IPV4[*]:+ (IPv4 uniquement)}"
+    else chk FAIL "Réseau : ${host#https://}" "ne répond pas : ${NET_LAST_ERROR:-aucune réponse} (indispensable)"; net=0; fi
   done
-  if curl -fsS --max-time 15 -o /dev/null -I https://aur.archlinux.org 2>/dev/null; then chk PASS "Réseau : aur.archlinux.org" "joignable"
+  if net_reachable https://aur.archlinux.org; then chk PASS "Réseau : aur.archlinux.org" "joignable"
   else chk WARN "Réseau : aur.archlinux.org" "injoignable : miroir GitHub utilisé en secours"; fi
   local free_root free_home
   free_root=$(LC_ALL=C df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9'); free_root=${free_root:-0}
@@ -2412,7 +2453,7 @@ diagnose_prereqs() {
     chk_if "Release end-4 $END4_TAG" '[[ $remote == "$END4_COMMIT" ]]' "${END4_COMMIT:0:12}" FAIL "le tag pointe sur ${remote:-?}"
     local n bad=""
     for n in "${PIN_ORDER[@]}"; do
-      curl -fsS --max-time 20 -o /dev/null -I "$ALA_URL/${n:0:1}/$n/$n-${PIN_VER[$n]}-x86_64.pkg.tar.zst" 2>/dev/null || bad+="$n "
+      url_exists "$ALA_URL/${n:0:1}/$n/$n-${PIN_VER[$n]}-x86_64.pkg.tar.zst" || bad+="$n "
     done
     chk_if "Pile épinglée dans l’Arch Linux Archive" '[[ -z $bad ]]' "${#PIN_ORDER[@]} paquets disponibles" FAIL "indisponibles : $bad"
   else

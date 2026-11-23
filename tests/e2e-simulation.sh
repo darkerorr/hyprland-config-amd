@@ -249,11 +249,18 @@ case $1 in
 esac'
 
 mock curl "$LOGCALL"'
-out=""; url=""; head=0
-while (($#)); do case $1 in -o) out=$2; shift 2;; -I) head=1; shift;; --max-time|--retry) shift 2;; -*) shift;; *) url=$1; shift;; esac; done
+out=""; url=""; head=0; w=""; v4=0
+while (($#)); do case $1 in -o) out=$2; shift 2;; -I) head=1; shift;; -w) w=$2; shift 2;; -4) v4=1; shift;;
+  --max-time|--retry|--retry-delay|--connect-timeout|-A|-r) shift 2;; -*) shift;; *) url=$1; shift;; esac; done
 host=${url#https://}; host=${host%%/*}
-if grep -qx "$host" "$MOCK/net-down" 2>/dev/null; then echo "curl: (6) Could not resolve host: $host" >&2; exit 6; fi
+if grep -qx "$host" "$MOCK/net-down" 2>/dev/null || { [[ -f $MOCK/ipv6-broken && $v4 == 0 ]]; }; then
+  [[ -n $w ]] && printf 000; echo "curl: (6) Could not resolve host: $host" >&2; exit 6; fi
+code=200
+# Racine de l’Archive Arch : répond 403 en HEAD (cas réel signalé) — le réseau marche pourtant.
+[[ $url == https://archive.archlinux.org && $head == 1 ]] && code=403
+[[ $url == https://archive.archlinux.org && -f $MOCK/archive-root-403 ]] && code=403
 [[ -n $out && $out != /dev/null ]] && echo data >"$out"
+[[ -n $w ]] && printf "%s" "$code"
 exit 0'
 
 mock sha256sum 'for a in "$@"; do [[ $a == -c ]] && exit 0; done; exec /usr/bin/sha256sum "$@"'
@@ -314,7 +321,7 @@ done
 fresh_db() {
   rm -rf -- "$MOCK/db"; mkdir -p "$MOCK/db"
   for p in base linux pacman sudo git curl networkmanager firefox endeavouros-keyring archlinux-keyring sddm; do echo 1.0-1 >"$MOCK/db/$p"; done
-  rm -f "$MOCK"/{locale,syu-block,aur-down,net-down,norepo,calls.log,forbidden.log,pacman.conf.at-syu} "$MOCK"/fail-makepkg-* "$MOCK"/interrupt-*
+  rm -f "$MOCK"/{archive-root-403,ipv6-broken,locale,syu-block,aur-down,net-down,norepo,calls.log,forbidden.log,pacman.conf.at-syu} "$MOCK"/fail-makepkg-* "$MOCK"/interrupt-*
 }
 reset_all() { fresh_db; mk_sysroot; rm -rf -- "$H"; mkdir -p "$H"; }
 
@@ -426,7 +433,7 @@ check "S6 diagnostic : étapes « NON EXÉCUTÉE »" grep -q 'NON EXÉCUTÉE' "$
 check "S6 diagnostic : paquets absents listés" grep -q 'Paquets absents' "$OUT"
 printf '%s\n' github.com archive.archlinux.org >"$MOCK/net-down"
 run_installer --diagnose
-check "S6 diagnostic hors réseau : pas d'arrêt brutal, prérequis en échec" bash -c "[[ $RC -eq 1 ]] && grep -q 'Réseau : github.com .*injoignable' '$OUT' && grep -q 'Rapport' '$OUT'"
+check "S6 diagnostic hors réseau : pas d'arrêt brutal, prérequis en échec" bash -c "[[ $RC -eq 1 ]] && grep -q 'Réseau : github.com .*ne répond pas' '$OUT' && grep -q 'Rapport' '$OUT'"
 rm -f "$MOCK/net-down"
 run_installer --yes
 run_installer --diagnose
@@ -456,6 +463,16 @@ reset_all
 run_installer --yes
 check "S8 AUR indisponible : installation terminée via le miroir" test "$RC" -eq 0
 check "S8 clonage via github.com/archlinux/aur" grep -q 'git clone .*--branch wlogout https://github.com/archlinux/aur.git' "$MOCK/calls.log"
+
+# =============================================================================
+# S10. Racine de l'Archive en 403 et IPv6 cassé : le réseau doit être reconnu
+# =============================================================================
+reset_all
+: >"$MOCK/archive-root-403"; : >"$MOCK/ipv6-broken"
+run_installer --yes
+check "S10 archive 403 + IPv6 cassé : installation terminée" test "$RC" -eq 0
+((RC == 0)) || show_out
+check "S10 IPv4 forcé pour les téléchargements" grep -q '^curl .*-4' "$MOCK/calls.log"
 
 # =============================================================================
 # S9. Dépendance AUR absente des dépôts : arrêt AVANT makepkg, cause explicite
