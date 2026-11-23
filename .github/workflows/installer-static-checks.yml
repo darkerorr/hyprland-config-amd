@@ -60,6 +60,10 @@ jobs:
           fi
           grep -q 'if \[\[ ! -s \$dest.sig \]\]' install.sh
           grep -q 'remove_incompatible_dependents' install.sh
+          if grep -q 'illogical-impulse-.*||.*hyprshot.*continue' install.sh; then
+            echo "Reverse dependencies must be checked, not skipped by package name"
+            exit 1
+          fi
           grep -q 'ensure_ignorepkg' install.sh
           grep -q 'PINS_RESTORED' install.sh
           grep -q 'repair mode defers pin-lock validation' tests/test-installer.sh
@@ -74,5 +78,5 @@ jobs:
 
       - name: Safe CLI smoke tests
         run: |
-          test "$(./install.sh --version)" = "1.2.8"
+          test "$(./install.sh --version)" = "1.2.9"
           ./install.sh --help >/dev/null
