@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.0.1"
+readonly INSTALLER_VERSION="1.0.2"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -129,7 +129,7 @@ readonly -a BASE_PKGS=(
   xdg-user-dirs xdg-utils polkit dconf kconfig plasma-integration
   kitty dolphin qalculate-qt plasma-systemmonitor easyeffects wev
   grim slurp wl-clipboard cliphist brightnessctl playerctl libnotify
-  tesseract-data-fra
+  tesseract-data-fra fontforge python-html2text
 )
 readonly -a GRAPHICS_PKGS=(mesa vulkan-radeon vulkan-icd-loader libva-utils vulkan-tools mesa-utils linux-firmware-amdgpu pciutils)
 readonly -a AUDIO_PKGS=(pipewire pipewire-alsa pipewire-pulse wireplumber alsa-utils pavucontrol-qt)
@@ -749,6 +749,15 @@ install_aur_packages() {
       gpg --keyserver hkps://keys.openpgp.org --recv-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F \
         || gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F \
         || warn "Clé PGP de wlogout non récupérée : vérification par somme MD5 seule."
+    fi
+    if [[ $base == 38c3-styles ]]; then
+      # 38c3-styles uses these tools in its shared build() function.
+      # html2markdown is built from AUR earlier; the other two are official packages.
+      local missing_tools=() tool
+      for tool in html2markdown html2text fontforge; do
+        command -v "$tool" >/dev/null 2>&1 || missing_tools+=("$tool")
+      done
+      (( ${#missing_tools[@]} == 0 )) || die "38c3-styles : dépendances de compilation absentes : ${missing_tools[*]}. Vérifiez html2markdown, python-html2text et fontforge."
     fi
     # --needed ne sert qu'avec makepkg -i ; les paquets sont installés séparément.
     local -a mkflags=(-s -r --noconfirm -f -c --log)
