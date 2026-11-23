@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.2.7"
+readonly INSTALLER_VERSION="1.2.8"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -725,37 +725,17 @@ ensure_ignorepkg() {
   sudo install -m 644 "$tmp" /etc/pacman.conf
   ok "IgnorePkg ajouté à /etc/pacman.conf (sauvegarde : $BACKUP_DIR)"
 }
-remove_installer_ignorepkg() {
-  local marker="# hypr-installer: pile Hyprland 0.54.3 épinglée"
-  grep -qF "$marker" /etc/pacman.conf || return 0
-  backup_path /etc/pacman.conf
-  local tmp
-  tmp=$(mktemp "$TMP_DIR/pacman.conf.XXXXXX")
-  awk -v marker="$marker" '
-    $0 == marker { skip=1; next }
-    skip==1 {
-      skip=0
-      if ($0 ~ /^IgnorePkg[[:space:]]*=/) next
-    }
-    { print }
-  ' /etc/pacman.conf >"$tmp"
-  sudo install -m 644 "$tmp" /etc/pacman.conf
-  log "IgnorePkg temporaire de hypr-installer retiré avant la mise à jour complète."
-}
 
 
 install_system_packages() {
-  # Retirer d'abord les paquets installés qui exigent une version incompatible
-  # avec la pile cible, sinon pacman -Syu peut refuser de résoudre la transaction.
+  # Retirer les dépendants incompatibles avant la transaction, puis protéger
+  # la pile cible : pacman -Syu ne doit jamais remplacer les versions épinglées.
   remove_incompatible_dependents
-  # Mettre tout le système à jour sans conserver d'anciens IgnorePkg gérés par
-  # l'installateur ; la pile Hyprland épinglée sera réinstallée à l'étape 05.
-  remove_installer_ignorepkg
+  ensure_ignorepkg
   local -a keyring_pkgs=(archlinux-keyring)
   pkg_installed endeavouros-keyring && keyring_pkgs+=(endeavouros-keyring)
   spin "Mise à jour des trousseaux de clés" sudo pacman -Sy --needed --noconfirm "${keyring_pkgs[@]}"
   spin "Mise à jour complète du système (pacman -Syu)" sudo pacman -Syu --noconfirm
-  ensure_ignorepkg
   assert_pins_intact
   # PulseAudio est remplacé par PipeWire (conflit avec pipewire-pulse).
   pkg_installed pulseaudio && remove_conflict pulseaudio pipewire-pulse
@@ -946,14 +926,14 @@ package_requires_incompatible_pin() {
         op=${BASH_REMATCH[1]}
         required=${BASH_REMATCH[2]}
         actual=$(target_pin_version "$n")
-        cmp=$(vercmp "$actual" "$required") || continue
-        case $op in
-          '>' ) (( cmp <= 0 )) && return 0 ;;
-          '>=' ) (( cmp < 0 )) && return 0 ;;
-          '=' ) (( cmp != 0 )) && return 0 ;;
-          '<' ) (( cmp >= 0 )) && return 0 ;;
-          '<=' ) (( cmp > 0 )) && return 0 ;;
-        esac
+        if ! dependency_version_satisfied "$token" "$actual"; then return 0; fi
+        if pkg_installed "$n"; then
+          local current_version
+          current_version=$(pkg_version "$n" || true)
+          if [[ -n $current_version ]] && ! dependency_version_satisfied "$token" "$current_version"; then
+            return 0
+          fi
+        fi
       fi
     done
   done
