@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.0.9"
+readonly INSTALLER_VERSION="1.1.0"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -888,6 +888,43 @@ pin_broken_list() {
 }
 
 # Paquets installés (hors pile) qui exigent une version plus récente des bibliothèques épinglées.
+package_requires_incompatible_pin() {
+  local package=$1 token n op required actual cmp dep_list
+  dep_list=$(LC_ALL=C pacman -Qi "$package" | awk '
+    /^Depends On[[:space:]]*:/ {
+      sub(/^[^:]*:[[:space:]]*/, "")
+      printf "%s ", $0
+      in_dep=1
+      next
+    }
+    in_dep && /^[[:space:]]+/ {
+      sub(/^[[:space:]]+/, "")
+      printf "%s ", $0
+      next
+    }
+    in_dep { exit }
+    END { print "" }
+  ')
+  for token in $dep_list; do
+    for n in "${PIN_ORDER[@]}"; do
+      if [[ $token =~ ^${n}(>=|<=|=|>|<)(.+)$ ]]; then
+        op=${BASH_REMATCH[1]}
+        required=${BASH_REMATCH[2]}
+        actual=$(expected_pin_version "$n")
+        cmp=$(vercmp "$actual" "$required") || continue
+        case $op in
+          '>' ) (( cmp <= 0 )) && return 0 ;;
+          '>=' ) (( cmp < 0 )) && return 0 ;;
+          '=' ) (( cmp != 0 )) && return 0 ;;
+          '<' ) (( cmp >= 0 )) && return 0 ;;
+          '<=' ) (( cmp > 0 )) && return 0 ;;
+        esac
+      fi
+    done
+  done
+  return 1
+}
+
 remove_incompatible_dependents() {
   local -a deps=() d n
   for n in "${PIN_ORDER[@]}"; do
@@ -899,13 +936,18 @@ remove_incompatible_dependents() {
       deps+=("$d")
     done
   done
-  mapfile -t deps < <(printf '%s\n' "${deps[@]}" | sort -u | grep -v '^$' || true)
-  ((${#deps[@]})) || return 0
+  mapfile -t deps < <(printf '%s\\n' "${deps[@]}" | sort -u | grep -v '^$' || true)
+  (("${#deps[@]}")) || return 0
   for d in "${deps[@]}"; do
     case $d in
       hyprpolkitagent|hyprland-qt-support|hyprpaper|hyprland-qtutils|quickshell|hyprshutdown)
         remove_conflict "$d" "pile Hyprland 0.54.3 (redondant avec end-4 / incompatible)";;
-      *) warn "« $d » dépend d’un paquet hypr* : il sera conservé, vérifiez sa compatibilité si pacman échoue.";;
+      *)
+        if package_requires_incompatible_pin "$d"; then
+          remove_conflict "$d" "contrainte de version incompatible avec la pile Hyprland épinglée"
+        else
+          warn "« $d » dépend d’un paquet Hyprland, mais aucune contrainte de version incompatible n’a été détectée : paquet conservé."
+        fi;;
     esac
   done
 }
