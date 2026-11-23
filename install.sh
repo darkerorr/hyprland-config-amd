@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="1.2.0"
+readonly INSTALLER_VERSION="1.2.1"
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -923,7 +923,7 @@ pin_broken_list() {
 
 # Paquets installés (hors pile) qui exigent une version plus récente des bibliothèques épinglées.
 package_requires_incompatible_pin() {
-  local package=$1 token n op required actual cmp dep_list
+  local package=$1 token n op required actual cmp dep_list pattern
   dep_list=$(LC_ALL=C pacman -Qi "$package" | awk '
     /^Depends On[[:space:]]*:/ {
       sub(/^[^:]*:[[:space:]]*/, "")
@@ -941,7 +941,8 @@ package_requires_incompatible_pin() {
   ')
   for token in $dep_list; do
     for n in "${PIN_ORDER[@]}"; do
-      if [[ $token =~ ^${n}(>=|<=|=|>|<)(.+)$ ]]; then
+      pattern="^${n}(>=|<=|=|>|<)(.+)$"
+      if [[ $token =~ $pattern ]]; then
         op=${BASH_REMATCH[1]}
         required=${BASH_REMATCH[2]}
         actual=$(target_pin_version "$n")
@@ -1091,8 +1092,9 @@ aur_provided() {   # le paquet est-il un paquet AUR épinglé ?
 }
 
 dependency_version_satisfied() {
-  local dep=$1 actual=$2 op required cmp
-  [[ $dep =~ ^[^\<\>=]+(>=|<=|=|>|<)(.+)$ ]] || return 0
+  local dep=$1 actual=$2 op required cmp constraint_re
+  constraint_re='^[^<>=]+(>=|<=|=|>|<)(.+)$'
+  [[ $dep =~ $constraint_re ]] || return 0
   op=${BASH_REMATCH[1]}
   required=${BASH_REMATCH[2]}
   cmp=$(vercmp "$actual" "$required") || return 1
