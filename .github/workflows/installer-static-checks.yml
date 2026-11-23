@@ -38,7 +38,7 @@ jobs:
             exit 1
           fi
           grep -q 'SPACE_GROTESK_SHA256=' install.sh
-          grep -q 'd == otf-space-grotesk' install.sh
+          grep -q 'pkg == otf-space-grotesk' install.sh
           grep -q 'fc-match.*Space Grotesk' install.sh
           grep -q 'check_aur_dependencies "$dir" "$base"' install.sh
           grep -q 'check_aur_dependencies "$dir" "illogical-impulse-$m"' install.sh
