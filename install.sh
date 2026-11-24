@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="2.0.3"
+readonly INSTALLER_VERSION="2.0.4"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
 readonly CHECKPOINT_SCHEMA=2
 readonly MAIN_PID=$$
@@ -30,7 +30,15 @@ readonly END4_COMMIT="bebf66da89cd2afa4738da47fb3a0a9fa5af7035"  # tag léger ->
 readonly END4_SHAPES_COMMIT="e31ec4cb4ebf6a46b267f5c42eabf6874916fa16" # sous-module rounded-polygon-qmljs
 # --- Quickshell (épinglé par end-4 dans illogical-impulse-quickshell-git) ----
 readonly QS_COMMIT="7511545ee20664e3b8b8d3322c0ffe7567c56f7a"
-readonly QS_FALLBACK_COMMIT="59e9c47b0eb48a9e4bcf9631fa062ee939bd2e83" # v0.3.0, descendant direct, antérieur à la release end-4
+# Qt 6.12 a cassé la compilation du commit épinglé par end-4 (constaté sur la
+# machine cible : échec dans src/wayland/hyprland/ipc). Le correctif amont est
+# 5d5d498 « all: use MOC includes … Fixes linking issues and Qt 6.12
+# compatibility » (2026-08-26), absent de 7511545 et de v0.3.0/v0.3.1.
+readonly QS_QT_FIX_MIN="6.12"            # Qt à partir duquel le commit épinglé ne compile plus
+readonly -a QS_FALLBACKS=(
+  "4f508be500dea6e5732cc3d50382a0048b17e7b1|v0.3.2"              # 1re release contenant le correctif Qt 6.12
+  "9b0f339b19057f4731bf3b48293307d7ef241671|master 2026-10-17"   # + 1c1cc91 (types MOC qualifiés)
+)
 readonly QS_MIRROR_URL="https://github.com/quickshell-mirror/quickshell.git"
 # --- Police Google Sans Flex (end-4 la clone sur "main" : on l'épingle) -------
 readonly GSF_REPO="https://github.com/end-4/google-sans-flex.git"
@@ -1913,28 +1921,44 @@ install_quickshell() {
   if pkg_installed illogical-impulse-quickshell-git && [[ $MODE != repair ]] && quickshell --private-check-compat >/dev/null 2>&1; then
     ok "Quickshell déjà installé et compatible avec Qt"; return 0
   fi
-  local used=$QS_COMMIT
-  local qcheck="$BUILD_DIR/meta/quickshell-preflight"
+  local qcheck="$BUILD_DIR/meta/quickshell-preflight" qt entry commit label rc=0 used=""
   rm -rf -- "${qcheck:?}"; mkdir -p "$qcheck"
   cp -a "$END4_DIR/sdata/dist-arch/illogical-impulse-quickshell-git/." "$qcheck/"
   check_aur_dependencies "$qcheck" "illogical-impulse-quickshell-git" || die "Quickshell : dépendances de compilation non résolues (liste ci-dessus)."
-  local rc=0
-  build_quickshell "$QS_COMMIT" || rc=$?
-  # Code 8 (dépendances) : changer de source ou de commit ne changerait rien.
-  ((rc != 8)) || die "Quickshell : makepkg ne peut pas installer les dépendances. ${LAST_CAUSE:-Voir les lignes affichées ci-dessus.}"
-  if ((rc != 0 && rc != 4)); then
-    warn "Quickshell : échec avec la source officielle (code $rc) ; nouvel essai via le miroir GitHub (même commit)."
-    rc=0; build_quickshell "$QS_COMMIT" "$QS_MIRROR_URL" || rc=$?
+  qt=$(pkg_version qt6-base); qt=${qt#*:}
+  # Candidats, du plus proche de la release end-4 au plus récent.
+  local -a candidates=()
+  if [[ -n $qt ]] && (( $(vercmp "${qt%%-*}" "$QS_QT_FIX_MIN") >= 0 )); then
+    info "Qt ${qt%%-*} : le commit Quickshell épinglé par end-4 (${QS_COMMIT:0:12}) ne compile plus avec Qt ≥ $QS_QT_FIX_MIN ; utilisation directe d’une version corrigée."
+  else
+    candidates+=("$QS_COMMIT|épinglé par end-4")
   fi
-  if ((rc != 0)); then
-    warn "Le commit Quickshell épinglé par end-4 ne compile pas avec Qt $(pkg_version qt6-base) (code $rc). Repli sur v0.3.0 (${QS_FALLBACK_COMMIT:0:12}), descendant direct antérieur à la release end-4."
-    build_quickshell "$QS_FALLBACK_COMMIT" "$QS_MIRROR_URL" || die "Quickshell ne compile pas. ${LAST_CAUSE:-Voir journal.}"
-    used=$QS_FALLBACK_COMMIT
-  fi
+  candidates+=("${QS_FALLBACKS[@]}")
+  for entry in "${candidates[@]}"; do
+    commit=${entry%%|*}; label=${entry#*|}
+    rc=0
+    if [[ $commit == "$QS_COMMIT" ]]; then
+      build_quickshell "$commit" || rc=$?
+      if ((rc != 0 && rc != 4 && rc != 8)); then
+        warn "Quickshell : source officielle indisponible (code $rc) ; nouvel essai via le miroir GitHub."
+        rc=0; build_quickshell "$commit" "$QS_MIRROR_URL" || rc=$?
+      fi
+    else
+      build_quickshell "$commit" "$QS_MIRROR_URL" || rc=$?
+    fi
+    # Code 8/15 (dépendances) : changer de version ne changerait rien.
+    ((rc != 8 && rc != 15)) || die "Quickshell : dépendances de compilation manquantes. ${LAST_CAUSE:-Voir les lignes affichées ci-dessus.}"
+    if ((rc == 0)); then used=$commit; break; fi
+    warn "Quickshell $label (${commit:0:12}) ne compile pas avec Qt ${qt%%-*} (code $rc) ; essai de la version suivante."
+  done
+  [[ -n $used ]] || die "Aucune version de Quickshell ne compile avec Qt ${qt%%-*}. ${LAST_CAUSE:-Voir journal.}"
   local -a files; mapfile -t files < <(cd "$BUILD_DIR/meta/illogical-impulse-quickshell-git" && makepkg --packagelist)
   install_pkgfiles "${files[@]}"
   state_set quickshell.commit "$used"
   quickshell --private-check-compat >/dev/null 2>&1 || warn "quickshell --private-check-compat signale une incompatibilité Qt"
+  if [[ $used != "$QS_COMMIT" ]]; then
+    warn "Quickshell ${used:0:12} utilisé à la place du commit épinglé par end-4 (incompatible avec Qt ${qt%%-*})."
+  fi
   ok "Quickshell installé (commit ${used:0:12})"
 }
 
@@ -2687,7 +2711,7 @@ validate_installation() {
   fi
   chk_if "Fichiers Quickshell identiques à la release" '[[ -z $qdiff ]]' "$CFG/quickshell" WARN "${qdiff:-}"
   local qsc; qsc=$(state_get quickshell.commit)
-  chk_if "Quickshell installé" 'pkg_installed illogical-impulse-quickshell-git && command -v qs >/dev/null' "commit ${qsc:0:12}$([[ $qsc == "$QS_FALLBACK_COMMIT" ]] && echo ' (repli v0.3.0)')"
+  chk_if "Quickshell installé" 'pkg_installed illogical-impulse-quickshell-git && command -v qs >/dev/null' "commit ${qsc:0:12}$([[ -n $qsc && $qsc != "$QS_COMMIT" ]] && echo ' (version corrigée pour Qt récent)')"
   chk_if "Quickshell compatible avec Qt installé" 'quickshell --private-check-compat >/dev/null 2>&1' "Qt $(pkg_version qt6-base)" WARN
   local pyok; pyok=$("$VENV_DIR/bin/python" -c 'import materialyoucolor, PIL, cv2, numpy, psutil, loguru; print("ok")' 2>/dev/null || true)
   chk_if "Environnement Python des widgets" '[[ $pyok == ok ]]' "${VENV_DIR/#$HOME/\~}"

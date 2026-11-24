@@ -174,6 +174,10 @@ case " $* " in
 esac
 base=$(basename "$PWD")
 if [[ -f $MOCK/interrupt-$base ]]; then rm -f "$MOCK/interrupt-$base"; kill -TERM "$(<"$MOCK/main.pid")"; sleep 2; fi
+qc=$(grep -m1 "^_commit=" PKGBUILD 2>/dev/null | cut -d= -f2 | tr -d "\047\042" || true)
+if [[ -n $qc ]] && grep -qx "$qc" "$MOCK/fail-qs-commits" 2>/dev/null; then
+  echo "src/wayland/hyprland/ipc/../../../core/model.hpp:169:25: error: Qt 6.12"; echo "==> ERROR: A failure occurred in build()."; exit 4
+fi
 if [[ -s $MOCK/fail-makepkg-$base ]]; then
   echo "==> Making package: $base"; echo "==> Installing missing dependencies..."
   echo "error: target not found: $(<"$MOCK/fail-makepkg-$base")"
@@ -330,7 +334,7 @@ done
 fresh_db() {
   rm -rf -- "$MOCK/db"; mkdir -p "$MOCK/db"
   for p in base linux pacman sudo git curl networkmanager firefox endeavouros-keyring archlinux-keyring sddm; do echo 1.0-1 >"$MOCK/db/$p"; done
-  rm -f "$MOCK"/{archive-root-403,ipv6-broken,locale,syu-block,aur-down,net-down,norepo,calls.log,forbidden.log,pacman.conf.at-syu} "$MOCK"/fail-makepkg-* "$MOCK"/interrupt-*
+  rm -f "$MOCK"/{fail-qs-commits,archive-root-403,ipv6-broken,locale,syu-block,aur-down,net-down,norepo,calls.log,forbidden.log,pacman.conf.at-syu} "$MOCK"/fail-makepkg-* "$MOCK"/interrupt-*
 }
 reset_all() { fresh_db; mk_sysroot; rm -rf -- "$H"; mkdir -p "$H"; }
 
@@ -502,6 +506,21 @@ check "S11 dossier temporaire orphelin supprimé" test ! -e "$T/hypr-installer.O
 check "S11 ancienne police utilisateur supprimée" test ! -e "$H/.local/share/fonts/space-grotesk"
 check "S11 paquets obsolètes retirés" bash -c "[[ ! -f '$MOCK/db/html2markdown' && ! -f '$MOCK/db/38c3-styles' ]]"
 check "S11 nettoyage annoncé" grep -q 'Restes des exécutions précédentes nettoyés' "$OUT"
+
+# =============================================================================
+# S12. Qt 6.12 : commit Quickshell épinglé incompatible -> version corrigée
+# =============================================================================
+reset_all
+echo 6.12.0-5 >"$MOCK/db/qt6-base"
+run_installer --yes
+check "S12 Qt 6.12 : installation terminée" test "$RC" -eq 0
+((RC == 0)) || show_out
+check "S12 Qt 6.12 : commit épinglé non tenté, v0.3.2 utilisé" bash -c "[[ \$(cat '$STATE/quickshell.commit') == 4f508be* ]]"
+reset_all
+printf '%s\n' "$QS_COMMIT" 4f508be500dea6e5732cc3d50382a0048b17e7b1 >"$MOCK/fail-qs-commits"
+run_installer --yes
+check "S12 échecs successifs : repli jusqu'au commit le plus récent" bash -c "[[ $RC -eq 0 && \$(cat '$STATE/quickshell.commit') == 9b0f339* ]]"
+rm -f "$MOCK/fail-qs-commits"
 
 # =============================================================================
 # S9. Dépendance AUR absente des dépôts : arrêt AVANT makepkg, cause explicite
