@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="3.3.0"
+readonly INSTALLER_VERSION="3.4.0"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
 readonly CHECKPOINT_SCHEMA=4
 readonly MAIN_PID=$$
@@ -2035,6 +2035,11 @@ hl.config({
     },
 })
 
+-- Réglages souris/clavier choisis dans l'application Paramètres (Super+I)
+if is_file_exists(HOME .. "/.config/hypr/hypr-parametres.lua") then
+    pcall(require, "hypr-parametres")
+end
+
 if is_file_exists(HOME .. "/.config/hypr/custom/general_user.lua") then
     require("custom.general_user")
 end
@@ -2095,7 +2100,11 @@ hl.bind("CTRL + SUPER + code:51", hl.dsp.window.resize({ x = 640, y = 480, "exac
 
 -- Aides ajoutées par l'installateur
 hl.bind("SUPER + F1", hl.dsp.global("quickshell:cheatsheetToggle"), { description = "Aide : liste des raccourcis" })
-hl.bind("SUPER + F2", hl.dsp.exec_cmd(HOME .. "/.local/share/hypr-installer/bin/install.sh --monitors"), { description = "Écrans : résolution et fréquence (Hz)" })
+hl.bind("SUPER + F2", hl.dsp.exec_cmd(HOME .. "/.local/share/hypr-installer/bin/hypr-parametres --page ecrans"), { description = "Paramètres : écrans (résolution, fréquence)" })
+-- Super+I : Paramètres du PC (écrans, souris, clavier, Wi-Fi, Bluetooth, son…)
+-- au lieu des réglages du bureau end-4 (accessibles depuis Paramètres > Système).
+hl.unbind("SUPER + I")
+hl.bind("SUPER + I", hl.dsp.exec_cmd(HOME .. "/.local/share/hypr-installer/bin/hypr-parametres"), { description = "Paramètres du PC" })
 
 if is_file_exists(HOME .. "/.config/hypr/custom/keybinds_user.lua") then
     require("custom.keybinds_user")
@@ -2110,7 +2119,7 @@ write_keybind_doc() {
   mkdir -p "$MANIFEST_DIR"
   cat >"$MANIFEST_DIR/raccourcis-azerty.txt" <<'EOF'
 RACCOURCIS (end-4, adaptés AZERTY) — aide à l'écran : Super+F1 (ou Super+!)
-Super+F2 : écrans (résolution, fréquence en Hz)
+Super+I : Paramètres du PC (écrans, souris, clavier, Wi-Fi, Bluetooth, son) | Super+F2 : écrans
 Super seul : recherche/lanceur | Super+Tab : vue d'ensemble | Super+A / Super+N : panneaux
 Super+& é " ' ( - è _ ç à : bureaux 1…10
 Super+Maj+(même touche) : déplacer la fenêtre et suivre | Super+Alt+(même touche) : envoyer sans suivre
@@ -2198,7 +2207,612 @@ EOF
   ok "Démarrage automatique configuré (Quickshell, hypridle, presse-papiers, agent polkit Quickshell, premier démarrage)"
 }
 
-configure_desktop() { configure_themes; configure_fonts; configure_wallpapers; configure_startup; }
+configure_desktop() { configure_themes; configure_fonts; configure_wallpapers; configure_startup; configure_settings_app; }
+
+# Application « Paramètres » (Super+I) : écrans, souris, clavier (Hyprland), et
+# accès aux Paramètres GNOME (Wi-Fi, Bluetooth, son, imprimantes, applications
+# par défaut…), à LACT et aux réglages du bureau end-4. GTK 4 + libadwaita.
+readonly -a SETTINGS_APP_PKGS=(gnome-control-center gnome-system-monitor python-gobject gtk4 libadwaita)
+configure_settings_app() {
+  pac_install "${SETTINGS_APP_PKGS[@]}"
+  mkdir -p "$BIN_DIR" "${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  write_settings_app >"$BIN_DIR/hypr-parametres.tmp"
+  chmod 755 "$BIN_DIR/hypr-parametres.tmp"
+  mv -f "$BIN_DIR/hypr-parametres.tmp" "$BIN_DIR/hypr-parametres"
+  write_managed "${XDG_DATA_HOME:-$HOME/.local/share}/applications/hypr-parametres.desktop" <<EOF
+[Desktop Entry]
+# $MANAGED_MARK
+Type=Application
+Name=Paramètres
+GenericName=Paramètres du PC
+Comment=Écrans, souris, clavier, Wi-Fi, Bluetooth, son…
+Exec=$BIN_DIR/hypr-parametres
+Icon=preferences-system
+Categories=Settings;System;
+Keywords=settings;parametres;ecran;display;monitor;souris;mouse;clavier;keyboard;wifi;bluetooth;son;
+StartupNotify=true
+EOF
+  ok "Application Paramètres (Super+I) : écrans, souris, clavier + Paramètres GNOME (Wi-Fi, Bluetooth, son…)"
+}
+
+write_settings_app() {
+  cat <<'PYAPP'
+#!/usr/bin/env python3
+# MANAGED-BY: hypr-installer
+"""Paramètres — réglages du PC pour Hyprland (écrans, souris, clavier) et accès
+aux Paramètres GNOME (Wi-Fi, Bluetooth, son…), à LACT et aux réglages du bureau.
+
+Fichiers écrits (jamais ailleurs) :
+  ~/.config/hypr/monitors.lua          écrans (chargé par end-4)
+  ~/.config/hypr/hypr-parametres.json  vos choix souris/clavier
+  ~/.config/hypr/hypr-parametres.lua   leur traduction pour Hyprland
+Chaque modification est vérifiée ; un réglage d'écran non confirmé dans les
+20 secondes est annulé automatiquement.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+HOME = os.path.expanduser("~")
+CFG = os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config")
+HYPR = os.path.join(CFG, "hypr")
+STATE = os.path.join(HYPR, "hypr-parametres.json")
+SETTINGS_LUA = os.path.join(HYPR, "hypr-parametres.lua")
+MONITORS_LUA = os.path.join(HYPR, "monitors.lua")
+MAIN_LUA = os.path.join(HYPR, "hyprland.lua")
+MARK = "# MANAGED-BY: hypr-installer"
+
+DEFAULTS = {
+    "sensitivity": 0.0,
+    "accel_profile": "adaptive",
+    "natural_scroll": False,
+    "left_handed": False,
+    "kb_variant": "",
+    "repeat_rate": 25,
+    "repeat_delay": 600,
+    "numlock": True,
+}
+KB_VARIANTS = [
+    ("", "AZERTY français (standard)"),
+    ("oss", "AZERTY français (variante complète)"),
+    ("nodeadkeys", "AZERTY sans touches mortes"),
+    ("afnor", "AZERTY AFNOR (nouvelle norme)"),
+    ("mac", "AZERTY Mac"),
+    ("bepo", "BÉPO"),
+]
+ACCEL = [("adaptive", "Adaptative (comme Windows)"), ("flat", "Plate (jeux, précision)")]
+SCALES = [1.0, 1.25, 1.5, 1.6, 2.0]
+POSITIONS = [("auto", "Automatique"), ("auto-left", "À gauche"), ("auto-right", "À droite"),
+             ("auto-up", "Au-dessus"), ("auto-down", "En dessous")]
+CONFIRM_SECONDS = 20
+
+
+# --------------------------------------------------------------------------- #
+# Logique (sans interface) — testée par tests/test-settings-app.py
+# --------------------------------------------------------------------------- #
+def load_state(path=STATE):
+    st = dict(DEFAULTS)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return st
+    if not isinstance(data, dict):
+        return st
+    for k, default in DEFAULTS.items():
+        v = data.get(k)
+        if isinstance(default, bool):
+            if isinstance(v, bool):
+                st[k] = v
+        elif isinstance(default, (int, float)):
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                st[k] = type(default)(v)
+        elif isinstance(v, str):
+            st[k] = v
+    st["sensitivity"] = max(-1.0, min(1.0, float(st["sensitivity"])))
+    st["repeat_rate"] = max(1, min(100, int(st["repeat_rate"])))
+    st["repeat_delay"] = max(100, min(2000, int(st["repeat_delay"])))
+    if st["accel_profile"] not in dict(ACCEL):
+        st["accel_profile"] = DEFAULTS["accel_profile"]
+    if st["kb_variant"] not in dict(KB_VARIANTS):
+        st["kb_variant"] = DEFAULTS["kb_variant"]
+    return st
+
+
+def lua_value(v):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return ("%.3f" % v).rstrip("0").rstrip(".") if v != int(v) else "%.1f" % v
+    s = str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+    return '"' + s + '"'
+
+
+def settings_lua(st):
+    rows = [
+        ("kb_layout", "fr"),
+        ("kb_variant", st["kb_variant"]),
+        ("numlock_by_default", st["numlock"]),
+        ("repeat_rate", st["repeat_rate"]),
+        ("repeat_delay", st["repeat_delay"]),
+        ("sensitivity", float(st["sensitivity"])),
+        ("accel_profile", st["accel_profile"]),
+        ("natural_scroll", st["natural_scroll"]),
+        ("left_handed", st["left_handed"]),
+    ]
+    body = "\n".join("        %s = %s," % (k, lua_value(v)) for k, v in rows)
+    return ("-- %s — généré par l'application Paramètres (Super+I).\n"
+            "-- Ne pas modifier à la main : utilisez Paramètres, ou custom/general_user.lua.\n"
+            "hl.config({\n    input = {\n%s\n    },\n})\n" % (MARK, body))
+
+
+def fmt_rate(rate):
+    s = "%.2f" % float(rate)
+    return s[:-3] if s.endswith(".00") else s
+
+
+def parse_monitors(text):
+    """hyprctl monitors all -j -> [{name, desc, modes, current, scale}]"""
+    out = []
+    for m in json.loads(text or "[]"):
+        modes, seen = [], set()
+        for raw in m.get("availableModes", []):
+            mode = raw[:-2] if raw.endswith("Hz") else raw
+            mm = re.match(r"^(\d+)x(\d+)@([\d.]+)$", mode)
+            if not mm or mode in seen:
+                continue
+            seen.add(mode)
+            modes.append((int(mm.group(1)), int(mm.group(2)), float(mm.group(3)), mode))
+        modes.sort(key=lambda t: (-(t[0] * t[1]), -t[2]))
+        w, h, r = m.get("width", 0), m.get("height", 0), float(m.get("refreshRate", 0) or 0)
+        current = None
+        for mw, mh, mr, mode in modes:
+            if mw == w and mh == h and abs(mr - r) < 0.05:
+                current = mode
+                break
+        out.append({
+            "name": m.get("name", "?"),
+            "desc": (m.get("description") or "").strip(),
+            "modes": [t[3] for t in modes],
+            "current": current or (modes[0][3] if modes else None),
+            "scale": float(m.get("scale", 1) or 1),
+            "disabled": bool(m.get("disabled", False)),
+        })
+    return out
+
+
+def best_mode(modes):
+    """Résolution native (la plus grande), puis fréquence maximale."""
+    return modes[0] if modes else None
+
+
+def mode_label(mode):
+    mm = re.match(r"^(\d+)x(\d+)@([\d.]+)$", mode)
+    if not mm:
+        return mode
+    return "%s × %s  —  %s Hz" % (mm.group(1), mm.group(2), fmt_rate(mm.group(3)))
+
+
+RULE_RE = re.compile(r'output\s*=\s*"([^"]+)"\s*,\s*mode\s*=\s*"([^"]+)"\s*,\s*position\s*=\s*"([^"]+)"\s*,\s*scale\s*=\s*"?([\w.]+)"?')
+
+
+def read_monitor_rules(path=MONITORS_LUA):
+    rules = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                mm = RULE_RE.search(line)
+                if mm:
+                    rules[mm.group(1)] = {"mode": mm.group(2), "position": mm.group(3), "scale": mm.group(4)}
+    except OSError:
+        pass
+    return rules
+
+
+def monitors_lua(rules):
+    lines = ["-- %s — écrans (Paramètres : Super+I, ou Super+F2)" % MARK]
+    for name, r in rules.items():
+        scale = r["scale"]
+        try:
+            scale_txt = lua_value(float(scale))
+        except (TypeError, ValueError):
+            scale_txt = '"auto"'
+        lines.append('hl.monitor({ output = %s, mode = %s, position = %s, scale = %s })'
+                     % (lua_value(name), lua_value(r["mode"]), lua_value(r["position"]), scale_txt))
+    return "\n".join(lines) + "\n"
+
+
+def write_atomic(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def snapshot(paths):
+    snap = {}
+    for p in paths:
+        try:
+            with open(p, encoding="utf-8") as f:
+                snap[p] = f.read()
+        except OSError:
+            snap[p] = None
+    return snap
+
+
+def restore(snap):
+    for p, content in snap.items():
+        if content is None:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        else:
+            write_atomic(p, content)
+
+
+def run(cmd, timeout=15):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 127, str(e)
+
+
+def config_ok():
+    """None si Hyprland n'est pas disponible pour vérifier, sinon True/False."""
+    if not shutil.which("Hyprland") or not os.path.exists(MAIN_LUA):
+        return None
+    _, out = run(["Hyprland", "--verify-config", "-c", MAIN_LUA], timeout=30)
+    return "config ok" in out.lower()
+
+
+def apply_input(st):
+    """Écrit les réglages souris/clavier, vérifie, recharge. Renvoie (ok, message)."""
+    snap = snapshot([STATE, SETTINGS_LUA])
+    before = config_ok()
+    write_atomic(STATE, json.dumps(st, indent=2, ensure_ascii=False) + "\n")
+    write_atomic(SETTINGS_LUA, settings_lua(st))
+    after = config_ok()
+    if before is not False and after is False:
+        restore(snap)
+        return False, "Hyprland a refusé ces réglages : rien n'a été changé."
+    run(["hyprctl", "reload"])
+    return True, "Réglages appliqués."
+
+
+def launch(cmd, env_extra=None):
+    env = dict(os.environ)
+    env.update(env_extra or {})
+    try:
+        subprocess.Popen(cmd, env=env, start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except OSError:
+        return False
+
+
+# --------------------------------------------------------------------------- #
+# Interface (GTK 4 + libadwaita)
+# --------------------------------------------------------------------------- #
+def run_gui(start_page="ecrans"):
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, GLib, Gtk
+
+    app = Adw.Application(application_id="fr.hyprinstaller.Parametres")
+
+    def on_activate(application):
+        wins = application.get_windows()
+        if wins:
+            wins[0].present()
+            return
+        win = Adw.ApplicationWindow(application=application, title="Paramètres")
+        win.set_default_size(860, 680)
+        stack = Adw.ViewStack()
+        switcher = Adw.ViewSwitcher(stack=stack, policy=Adw.ViewSwitcherPolicy.WIDE)
+        header = Adw.HeaderBar()
+        header.set_title_widget(switcher)
+        toasts = Adw.ToastOverlay()
+        toasts.set_child(stack)
+        view = Adw.ToolbarView()
+        view.add_top_bar(header)
+        view.set_content(toasts)
+        win.set_content(view)
+
+        def toast(msg):
+            toasts.add_toast(Adw.Toast.new(msg))
+
+        def combo(title, labels, selected, subtitle=None):
+            row = Adw.ComboRow(title=title)
+            if subtitle:
+                row.set_subtitle(subtitle)
+            row.set_model(Gtk.StringList.new(labels))
+            row.set_selected(max(0, selected))
+            return row
+
+        def apply_button(label, cb):
+            b = Gtk.Button(label=label)
+            b.add_css_class("suggested-action")
+            b.add_css_class("pill")
+            b.set_valign(Gtk.Align.CENTER)
+            b.connect("clicked", lambda *_: cb())
+            return b
+
+        # ---------------- Écrans ----------------
+        def screens_page():
+            code, out = run(["hyprctl", "monitors", "all", "-j"])
+            try:
+                mons = parse_monitors(out) if code == 0 else []
+            except ValueError:
+                mons = []
+            if not mons:
+                return Adw.StatusPage(title="Écrans indisponibles", icon_name="video-display-symbolic",
+                                      description="Ouvrez Paramètres depuis la session Hyprland.")
+            page = Adw.PreferencesPage()
+            rules = read_monitor_rules()
+            widgets = []
+
+            def apply_screens():
+                new = dict(read_monitor_rules())
+                for m, mode_row, scale_row, scales, pos_row in widgets:
+                    if not m["modes"]:
+                        continue
+                    new[m["name"]] = {
+                        "mode": m["modes"][mode_row.get_selected()],
+                        "position": POSITIONS[pos_row.get_selected()][0] if pos_row else "auto",
+                        "scale": scales[scale_row.get_selected()],
+                    }
+                snap = snapshot([MONITORS_LUA])
+                write_atomic(MONITORS_LUA, monitors_lua(new))
+                run(["hyprctl", "reload"])
+                confirm_screens(snap)
+
+            head = Adw.PreferencesGroup(
+                title="Écrans", description="Le réglage s'applique tout de suite. Sans confirmation sous "
+                "%d secondes, l'ancien revient automatiquement." % CONFIRM_SECONDS)
+            head.set_header_suffix(apply_button("Appliquer", apply_screens))
+            best = Adw.ActionRow(title="Choisir automatiquement",
+                                 subtitle="Résolution native et fréquence maximale de chaque écran", activatable=True)
+            best.add_suffix(Gtk.Image.new_from_icon_name("starred-symbolic"))
+
+            def pick_best(*_):
+                for m, mode_row, _s, _sc, _p in widgets:
+                    if m["modes"]:
+                        mode_row.set_selected(m["modes"].index(best_mode(m["modes"])))
+                toast("Sélection faite : cliquez sur « Appliquer ».")
+            best.connect("activated", pick_best)
+            head.add(best)
+            page.add(head)
+
+            for m in mons:
+                if not m["modes"]:
+                    continue
+                g = Adw.PreferencesGroup(title=m["desc"] or m["name"], description="Sortie " + m["name"])
+                modes = m["modes"]
+                cur = rules.get(m["name"], {}).get("mode", m["current"])
+                mode_row = combo("Résolution et fréquence", [mode_label(x) for x in modes],
+                                 modes.index(cur) if cur in modes else 0)
+                g.add(mode_row)
+                scales = list(SCALES)
+                cur_scale = m["scale"]
+                if all(abs(x - cur_scale) > 0.01 for x in scales):
+                    scales.append(cur_scale)
+                    scales.sort()
+                scale_row = combo("Échelle (taille du texte et des fenêtres)",
+                                  ["%d %%" % round(x * 100) for x in scales],
+                                  min(range(len(scales)), key=lambda k: abs(scales[k] - cur_scale)))
+                g.add(scale_row)
+                pos_row = None
+                if len(mons) > 1:
+                    cur_pos = rules.get(m["name"], {}).get("position", "auto")
+                    keys = [k for k, _ in POSITIONS]
+                    pos_row = combo("Position par rapport aux autres écrans", [lbl for _, lbl in POSITIONS],
+                                    keys.index(cur_pos) if cur_pos in keys else 0)
+                    g.add(pos_row)
+                page.add(g)
+                widgets.append((m, mode_row, scale_row, scales, pos_row))
+            return page
+
+        def confirm_screens(snap):
+            state = {"left": CONFIRM_SECONDS, "done": False}
+
+            def revert():
+                restore(snap)
+                run(["hyprctl", "reload"])
+                toast("Ancien réglage d'écran remis.")
+
+            def finish(keep):
+                if state["done"]:
+                    return
+                state["done"] = True
+                if keep:
+                    toast("Réglage d'écran enregistré.")
+                else:
+                    revert()
+
+            body = "Sans réponse, retour à l'ancien réglage dans %d s."
+            if hasattr(Adw, "AlertDialog"):
+                d = Adw.AlertDialog(heading="Garder ces réglages d'écran ?", body=body % state["left"])
+            else:
+                d = Adw.MessageDialog(transient_for=win, heading="Garder ces réglages d'écran ?",
+                                      body=body % state["left"])
+            d.add_response("revert", "Annuler")
+            d.add_response("keep", "Garder")
+            d.set_response_appearance("keep", Adw.ResponseAppearance.SUGGESTED)
+            d.set_default_response("keep")
+            d.set_close_response("revert")
+            d.connect("response", lambda _d, r: finish(r == "keep"))
+
+            def tick():
+                if state["done"]:
+                    return False
+                state["left"] -= 1
+                if state["left"] <= 0:
+                    finish(False)
+                    try:
+                        d.force_close() if hasattr(d, "force_close") else d.close()
+                    except Exception:  # noqa: BLE001 — la fenêtre peut déjà être fermée
+                        pass
+                    return False
+                d.set_body(body % state["left"])
+                return True
+            GLib.timeout_add_seconds(1, tick)
+            if hasattr(Adw, "AlertDialog"):
+                d.present(win)
+            else:
+                d.present()
+
+        # ---------------- Souris / Clavier ----------------
+        st = load_state()
+
+        def input_apply(update):
+            new = dict(load_state())
+            update(new)
+            ok, msg = apply_input(new)
+            toast(msg)
+
+        def mouse_page():
+            page = Adw.PreferencesPage()
+            g = Adw.PreferencesGroup(title="Souris")
+            sens = Adw.ActionRow(title="Vitesse du pointeur", subtitle="-1 lent · 0 normal · 1 rapide")
+            scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, -1.0, 1.0, 0.05)
+            scale.set_value(st["sensitivity"])
+            scale.set_digits(2)
+            scale.set_draw_value(True)
+            scale.set_hexpand(True)
+            scale.set_size_request(280, -1)
+            scale.add_mark(0.0, Gtk.PositionType.BOTTOM, None)
+            sens.add_suffix(scale)
+            g.add(sens)
+            accel = combo("Accélération", [lbl for _, lbl in ACCEL], [k for k, _ in ACCEL].index(st["accel_profile"]))
+            g.add(accel)
+            nat = Adw.SwitchRow(title="Défilement naturel", subtitle="La page suit le mouvement des doigts")
+            nat.set_active(st["natural_scroll"])
+            g.add(nat)
+            left = Adw.SwitchRow(title="Souris pour gaucher", subtitle="Inverse les boutons gauche et droit")
+            left.set_active(st["left_handed"])
+            g.add(left)
+
+            def upd(n):
+                n["sensitivity"] = round(scale.get_value(), 2)
+                n["accel_profile"] = ACCEL[accel.get_selected()][0]
+                n["natural_scroll"] = nat.get_active()
+                n["left_handed"] = left.get_active()
+            g.set_header_suffix(apply_button("Appliquer", lambda: input_apply(upd)))
+            page.add(g)
+            return page
+
+        def keyboard_page():
+            page = Adw.PreferencesPage()
+            g = Adw.PreferencesGroup(title="Clavier", description="Les raccourcis restent adaptés à l'AZERTY.")
+            var = combo("Disposition", [lbl for _, lbl in KB_VARIANTS], [k for k, _ in KB_VARIANTS].index(st["kb_variant"]))
+            g.add(var)
+            delay = Adw.SpinRow.new_with_range(100, 2000, 50)
+            delay.set_title("Délai avant répétition (ms)")
+            delay.set_subtitle("Temps d'appui avant qu'une touche se répète")
+            delay.set_value(st["repeat_delay"])
+            g.add(delay)
+            rate = Adw.SpinRow.new_with_range(1, 100, 1)
+            rate.set_title("Vitesse de répétition (caractères/s)")
+            rate.set_value(st["repeat_rate"])
+            g.add(rate)
+            num = Adw.SwitchRow(title="Verr. Num activé au démarrage")
+            num.set_active(st["numlock"])
+            g.add(num)
+
+            def upd(n):
+                n["kb_variant"] = KB_VARIANTS[var.get_selected()][0]
+                n["repeat_delay"] = int(delay.get_value())
+                n["repeat_rate"] = int(rate.get_value())
+                n["numlock"] = num.get_active()
+            g.set_header_suffix(apply_button("Appliquer", lambda: input_apply(upd)))
+            page.add(g)
+            t = Adw.PreferencesGroup(title="Essai")
+            entry = Gtk.Entry(placeholder_text="Tapez ici pour essayer : é è à ç ù € @ …")
+            entry.set_margin_top(6)
+            entry.set_margin_bottom(6)
+            t.add(entry)
+            page.add(t)
+            return page
+
+        # ---------------- Système (autres applications) ----------------
+        def system_page():
+            page = Adw.PreferencesPage()
+            gnome = {"XDG_CURRENT_DESKTOP": "GNOME"}
+            sections = [
+                ("Réseau et appareils", [
+                    ("network-wireless-symbolic", "Wi-Fi", "Réseaux sans fil", ["gnome-control-center", "wifi"], gnome),
+                    ("network-wired-symbolic", "Réseau filaire et VPN", None, ["gnome-control-center", "network"], gnome),
+                    ("bluetooth-active-symbolic", "Bluetooth", None, ["gnome-control-center", "bluetooth"], gnome),
+                    ("audio-speakers-symbolic", "Son", "Sorties, micro, volume par application",
+                     ["gnome-control-center", "sound"], gnome),
+                    ("printer-symbolic", "Imprimantes", None, ["gnome-control-center", "printers"], gnome),
+                ]),
+                ("Système", [
+                    ("preferences-system-symbolic", "Tous les autres paramètres",
+                     "Applications par défaut, date et heure, utilisateurs, confidentialité…",
+                     ["gnome-control-center"], gnome),
+                    ("video-display-symbolic", "Carte graphique AMD (LACT)", "Fréquences, températures, ventilateur",
+                     ["lact", "gui"], None),
+                    ("utilities-system-monitor-symbolic", "Gestionnaire des tâches", "Aussi : Ctrl+Maj+Échap",
+                     ["gnome-system-monitor"], None),
+                ]),
+                ("Bureau", [
+                    ("preferences-desktop-appearance-symbolic", "Réglages du bureau",
+                     "Barre, widgets, animations, fond d'écran (end-4)",
+                     ["qs", "-p", os.path.join(CFG, "quickshell/ii/settings.qml")], None),
+                    ("input-keyboard-symbolic", "Liste des raccourcis", "Aussi : Super+F1",
+                     ["qs", "-c", "ii", "ipc", "call", "cheatsheet", "toggle"], None),
+                ]),
+            ]
+            for title, rows in sections:
+                g = Adw.PreferencesGroup(title=title)
+                for icon, name, sub, cmd, env in rows:
+                    r = Adw.ActionRow(title=name, activatable=True)
+                    if sub:
+                        r.set_subtitle(sub)
+                    r.add_prefix(Gtk.Image.new_from_icon_name(icon))
+                    r.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+
+                    def go(_r, cmd=cmd, env=env, name=name):
+                        if not shutil.which(cmd[0]) or not launch(cmd, env):
+                            toast("« %s » n'est pas installé." % name)
+                    r.connect("activated", go)
+                    g.add(r)
+                page.add(g)
+            return page
+
+        stack.add_titled_with_icon(screens_page(), "ecrans", "Écrans", "video-display-symbolic")
+        stack.add_titled_with_icon(mouse_page(), "souris", "Souris", "input-mouse-symbolic")
+        stack.add_titled_with_icon(keyboard_page(), "clavier", "Clavier", "input-keyboard-symbolic")
+        stack.add_titled_with_icon(system_page(), "systeme", "Système", "preferences-system-symbolic")
+        if start_page in ("ecrans", "souris", "clavier", "systeme"):
+            stack.set_visible_child_name(start_page)
+        win.present()
+
+    app.connect("activate", on_activate)
+    return app.run([sys.argv[0]])
+
+
+def main(argv):
+    page = "ecrans"
+    if len(argv) > 2 and argv[1] == "--page":
+        page = argv[2]
+    return run_gui(page)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+PYAPP
+}
 
 # =============================================================================
 # 15. ÉTAPE 11 — SERVICES
@@ -2349,6 +2963,7 @@ verify_step_7() {
 
 verify_step_8() {
   grep -q 'kb_layout = "fr"' "$HYPR_CUSTOM/general.lua" 2>/dev/null || vp "kb_layout = \"fr\" absent de $HYPR_CUSTOM/general.lua"
+  grep -q 'hypr-parametres.lua' "$HYPR_CUSTOM/general.lua" 2>/dev/null || vp "réglages de l’application Paramètres non chargés"
   if command -v localectl >/dev/null; then
     contains 'X11 Layout: fr' "$(localectl status 2>/dev/null || true)" || vp "disposition X11 (écran de connexion) différente de fr"
   fi
@@ -2357,7 +2972,7 @@ verify_step_8() {
 
 verify_step_9() {
   grep -qF "$MANAGED_MARK" "$HYPR_CUSTOM/keybinds.lua" 2>/dev/null || vp "adaptation AZERTY absente ($HYPR_CUSTOM/keybinds.lua)"
-  grep -qF '"SUPER + F2"' "$HYPR_CUSTOM/keybinds.lua" 2>/dev/null || vp "raccourcis d’aide (Super+F1/F2) absents"
+  grep -qF 'bin/hypr-parametres --page ecrans' "$HYPR_CUSTOM/keybinds.lua" 2>/dev/null || vp "raccourcis Paramètres (Super+I, Super+F2) absents"
   return 0
 }
 
@@ -2366,6 +2981,8 @@ verify_step_10() {
   [[ -x $BIN_DIR/install.sh ]] || vp "copie de l’installateur absente ($BIN_DIR/install.sh)"
   [[ -f $HYPR_CUSTOM/env.lua ]] || vp "custom/env.lua absent"
   [[ -f $HOME/.icons/default/index.theme ]] || vp "thème de curseur par défaut absent"
+  [[ -x $BIN_DIR/hypr-parametres ]] && cmp -s "$BIN_DIR/hypr-parametres" <(write_settings_app) || vp "application Paramètres absente ou ancienne version"
+  verify_pkgs "${SETTINGS_APP_PKGS[@]}"
   return 0
 }
 

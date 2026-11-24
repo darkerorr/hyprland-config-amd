@@ -33,6 +33,9 @@ jobs:
       - name: Unit tests
         run: bash tests/test-installer.sh
 
+      - name: Settings app tests (logic + interface with mocked GTK)
+        run: python3 tests/test-settings-app.py
+
       - name: End-to-end simulation (mocked system, failure injection, resume, diagnose, repair)
         run: bash tests/e2e-simulation.sh
 
@@ -66,5 +69,5 @@ jobs:
 
       - name: Safe CLI smoke tests
         run: |
-          test "$(./install.sh --version)" = "3.3.0"
+          test "$(./install.sh --version)" = "3.4.0"
           ./install.sh --help >/dev/null
