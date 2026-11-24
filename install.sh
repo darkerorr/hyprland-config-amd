@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="3.1.0"
+readonly INSTALLER_VERSION="3.2.0"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
 readonly CHECKPOINT_SCHEMA=4
 readonly MAIN_PID=$$
@@ -173,6 +173,10 @@ readonly -a BASE_PKGS=(
   tesseract-data-fra
 )
 readonly -a GRAPHICS_PKGS=(mesa vulkan-radeon vulkan-icd-loader libva-utils vulkan-tools mesa-utils linux-firmware-amdgpu pciutils)
+# Compléments : 32 bits (jeux, Steam, Wine — si le dépôt multilib est activé),
+# panneau de contrôle de la carte (LACT, équivalent du logiciel AMD Windows), amdgpu_top (moniteur).
+readonly -a GRAPHICS_EXTRA_PKGS=(lact amdgpu_top)
+readonly -a GRAPHICS_LIB32_PKGS=(lib32-mesa lib32-vulkan-radeon)
 readonly -a AUDIO_PKGS=(pipewire pipewire-alsa pipewire-pulse wireplumber alsa-utils pavucontrol-qt)
 readonly -a FONT_PKGS=(noto-fonts noto-fonts-cjk noto-fonts-emoji otf-font-awesome ttf-nerd-fonts-symbols ttf-jetbrains-mono-nerd fontconfig)
 readonly -a NET_PKGS=(networkmanager)
@@ -1397,6 +1401,20 @@ install_graphics() {
   done
   pkg_installed amdvlk && warn "amdvlk installé : RADV (vulkan-radeon) sera utilisé par défaut ; amdvlk est abandonné par AMD."
   pac_install "${GRAPHICS_PKGS[@]}"
+  local -a extra=() skipped=()
+  for p in "${GRAPHICS_EXTRA_PKGS[@]}"; do if pkg_installed "$p" || repo_available "$p"; then extra+=("$p"); else skipped+=("$p"); fi; done
+  if grep -qE '^[[:space:]]*\[multilib\]' "$PACMAN_CONF"; then
+    for p in "${GRAPHICS_LIB32_PKGS[@]}"; do if pkg_installed "$p" || repo_available "$p"; then extra+=("$p"); else skipped+=("$p"); fi; done
+  else
+    info "Dépôt multilib désactivé : pilotes 32 bits (Steam, Wine) non installés."
+  fi
+  ((${#extra[@]})) && pac_install "${extra[@]}"
+  ((${#skipped[@]})) && info "Absents des dépôts, ignorés : ${skipped[*]}"
+  state_set graphics.extra "${extra[*]}"
+  if pkg_installed lact && ! systemctl is-enabled --quiet lactd.service 2>/dev/null; then
+    spin "Activation de lactd (LACT)" sudo systemctl enable --now lactd.service || warn "lactd non activé (${LAST_CAUSE:-voir journal})."
+  fi
+  ok "Pilote AMD : amdgpu (noyau) + Mesa RADV (Vulkan), VA-API ; ${extra[*]:-aucun complément}"
   info "libva-mesa-driver et mesa-vdpau n’existent plus : VA-API est fourni par « mesa » (VDPAU abandonné par Mesa)."
   if [[ -d /sys/module/amdgpu ]]; then ok "Module noyau amdgpu chargé"; else warn "Module amdgpu non chargé (sera vérifié après redémarrage)."; fi
   if [[ -e /dev/dri/renderD128 ]]; then ok "Nœud de rendu /dev/dri/renderD128 présent"; fi
@@ -2067,6 +2085,10 @@ hl.bind("SUPER + code:61", hl.dsp.global("quickshell:cheatsheetToggle"), { descr
 hl.bind("SUPER + code:60", hl.dsp.global("quickshell:overviewEmojiToggle"), { description = "Émojis (touche :)" })
 hl.bind("CTRL + SUPER + code:51", hl.dsp.window.resize({ x = 640, y = 480, "exact" }))
 
+-- Aides ajoutées par l'installateur
+hl.bind("SUPER + F1", hl.dsp.global("quickshell:cheatsheetToggle"), { description = "Aide : liste des raccourcis" })
+hl.bind("SUPER + F2", hl.dsp.exec_cmd(HOME .. "/.local/share/hypr-installer/bin/install.sh --monitors"), { description = "Écrans : résolution et fréquence (Hz)" })
+
 if is_file_exists(HOME .. "/.config/hypr/custom/keybinds_user.lua") then
     require("custom.keybinds_user")
 end
@@ -2079,7 +2101,8 @@ EOF
 write_keybind_doc() {
   mkdir -p "$MANIFEST_DIR"
   cat >"$MANIFEST_DIR/raccourcis-azerty.txt" <<'EOF'
-RACCOURCIS (end-4, adaptés AZERTY) — aide à l'écran : Super+! (ou Super+/)
+RACCOURCIS (end-4, adaptés AZERTY) — aide à l'écran : Super+F1 (ou Super+!)
+Super+F2 : écrans (résolution, fréquence en Hz)
 Super seul : recherche/lanceur | Super+Tab : vue d'ensemble | Super+A / Super+N : panneaux
 Super+& é " ' ( - è _ ç à : bureaux 1…10
 Super+Maj+(même touche) : déplacer la fenêtre et suivre | Super+Alt+(même touche) : envoyer sans suivre
@@ -2276,7 +2299,13 @@ verify_step_3() {
   return 0
 }
 
-verify_step_4() { verify_pkgs "${GRAPHICS_PKGS[@]}"; }
+verify_step_4() {
+  verify_pkgs "${GRAPHICS_PKGS[@]}"
+  local p
+  [[ -f $STATE_DIR/graphics.extra ]] || vp "compléments graphiques (32 bits, LACT) non installés"
+  for p in $(state_get graphics.extra); do pkg_installed "$p" || vp_pkg "$p"; done
+  return 0
+}
 
 verify_step_5() {
   verify_pkgs "${HYPR_PKGS[@]}"
@@ -2318,6 +2347,7 @@ verify_step_8() {
 
 verify_step_9() {
   grep -qF "$MANAGED_MARK" "$HYPR_CUSTOM/keybinds.lua" 2>/dev/null || vp "adaptation AZERTY absente ($HYPR_CUSTOM/keybinds.lua)"
+  grep -qF '"SUPER + F2"' "$HYPR_CUSTOM/keybinds.lua" 2>/dev/null || vp "raccourcis d’aide (Super+F1/F2) absents"
   return 0
 }
 
@@ -2464,6 +2494,17 @@ install_ai_skills() {
   ok "Skills IA : $n installée(s) dans ~/.claude/skills$( ((kept)) && echo " ($kept skill(s) personnelle(s) conservée(s))")"
 }
 
+# Brave : Wayland natif + décodage vidéo matériel (VA-API, RX 550). Lu par le
+# lanceur de brave-bin ; jamais écrasé s'il existe déjà.
+configure_brave() {
+  pkg_installed brave-bin || return 0
+  [[ -f $CFG/brave-flags.conf ]] && { log "brave-flags.conf existant conservé"; return 0; }
+  printf '%s\n' "--ozone-platform-hint=auto" \
+    "--enable-features=AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,AcceleratedVideoEncoder" \
+    >"$CFG/brave-flags.conf"
+  ok "Brave : Wayland + accélération vidéo matérielle"
+}
+
 configure_docker() {
   pkg_installed docker || return 0
   if ! systemctl is-enabled --quiet docker.socket 2>/dev/null; then
@@ -2484,6 +2525,7 @@ install_apps_and_dev() {
   ensure_local_bin_path
   install_dev_packages
   install_aur_latest
+  configure_brave
   configure_docker
   install_npm_globals
   install_claude_code
@@ -2993,10 +3035,10 @@ generate_report() {
 # =============================================================================
 wait_for() { local t=$1; shift; local i; for ((i = 0; i < t; i++)); do "$@" &>/dev/null && return 0; sleep 1; done; return 1; }
 
-session_monitors() {
+session_monitors() {   # session_monitors [force]
   # end-4 charge ~/.config/hypr/monitors.lua s'il existe (format nwg-displays).
   local conf="$CFG/hypr/monitors.lua" out=""
-  if grep -q 'hl.monitor' "$conf" 2>/dev/null; then log "monitors.lua déjà configuré"; return 0; fi
+  if [[ ${1:-} != force ]] && grep -q 'hl.monitor' "$conf" 2>/dev/null; then log "monitors.lua déjà configuré"; return 0; fi
   while IFS=$'\t' read -r name w h modes; do
     local best="" bestr=0 m r scale=1
     for m in $modes; do
@@ -3067,6 +3109,92 @@ first_login() {
     notify-send -a "Installation Hyprland" "Bureau prêt ✔" "$CHECK_PASS tests OK, $CHECK_WARN avertissement(s). Super+F1 : liste des raccourcis."
   fi
   date '+%F %T' >"$STATE_DIR/first-login.done"
+}
+
+# =============================================================================
+# 17 ter. MODE --monitors (Super+F2) : résolution et fréquence de chaque écran
+# =============================================================================
+# Menu fuzzel (ou terminal) ; le choix est écrit dans ~/.config/hypr/monitors.lua
+# (chargé par end-4), appliqué aussitôt, puis CONFIRMÉ : sans réponse sous 20 s
+# (écran noir, mode refusé…), l'ancien réglage revient automatiquement.
+pick() {   # pick <invite> : choix d'une ligne de stdin (fuzzel en session, sinon terminal)
+  local prompt=$1 n=0 l a
+  local -a items=()
+  mapfile -t items
+  if [[ -n ${WAYLAND_DISPLAY:-} ]] && command -v fuzzel >/dev/null; then
+    printf '%s\n' "${items[@]}" | timeout "${PICK_TIMEOUT:-120}" fuzzel --dmenu --prompt "$prompt " --width 72 --lines 15 2>/dev/null || true
+    return 0
+  fi
+  [[ -r /dev/tty ]] || return 0
+  for l in "${items[@]}"; do n=$((n + 1)); printf '  %2d) %s\n' "$n" "$l" >&3; done
+  printf '  %s ' "$prompt" >&3
+  read -r -t "${PICK_TIMEOUT:-120}" a </dev/tty || return 0
+  [[ $a =~ ^[0-9]+$ ]] && ((a >= 1 && a <= n)) && printf '%s\n' "${items[a - 1]}"
+  return 0
+}
+
+monitor_lines() {   # une ligne par mode : « SORTIE │ LxH @ F Hz[ (actuel)] │ description »
+  hyprctl monitors all -j | jq -r '.[] | [.name, (.description // ""), ("\(.width)x\(.height)@\(.refreshRate * 100 | round / 100)"), (.availableModes | join(" "))] | @tsv' |
+  while IFS=$'\t' read -r name desc cur modes; do
+    printf '%s\n' $modes | sed 's/Hz$//' | awk -F'[x@]' '!seen[$0]++ {printf "%d\t%s\t%s\n", $1*$2, $3, $0}' | sort -t$'\t' -k1,1nr -k2,2gr |
+    while IFS=$'\t' read -r _ rate mode; do
+      local tag=""; awk -v a="${mode#*@}" -v b="${cur#*@}" -v r1="${mode%@*}" -v r2="${cur%@*}" 'BEGIN{exit !(r1==r2 && (a-b)^2 < 0.01)}' && tag=" (actuel)"
+      printf '%s │ %s @ %s Hz%s │ %s\n' "$name" "${mode%@*}" "$(printf '%.2f' "$rate" | sed 's/\.00$//')" "$tag" "${desc:0:40}"
+    done
+  done
+}
+
+monitors_write() {   # monitors_write <sortie> <mode LxH@F>  (les autres écrans sont conservés)
+  local name=$1 mode=$2 conf="$CFG/hypr/monitors.lua" scale=1 w
+  w=${mode%%x*}; ((w >= 3840)) && scale='"auto"'
+  local old; old=$(grep -E "output = \"$name\"" "$conf" 2>/dev/null | head -1 || true)
+  [[ $old =~ scale\ =\ ([^ }]+) ]] && scale=${BASH_REMATCH[1]}
+  {
+    printf -- '-- %s — écrans (Super+F2 pour changer)\n' "$MANAGED_MARK"
+    grep -E '^hl\.monitor\(' "$conf" 2>/dev/null | grep -vF "output = \"$name\"" || true
+    printf 'hl.monitor({ output = "%s", mode = "%s", position = "auto", scale = %s })\n' "$name" "$mode" "$scale"
+  } >"$conf.tmp"
+  mv -f "$conf.tmp" "$conf"
+}
+
+monitors_menu() {
+  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] || die "À lancer depuis la session Hyprland (raccourci Super+F2)."
+  command -v jq >/dev/null || die "jq est requis."
+  local conf="$CFG/hypr/monitors.lua" choice name res rate keep auto="★ Automatique : résolution native et fréquence maximale (tous les écrans)"
+  local -a lines=()
+  mapfile -t lines < <(monitor_lines)
+  ((${#lines[@]})) || die "Aucun écran détecté par hyprctl."
+  choice=$(printf '%s\n' "$auto" "${lines[@]}" | pick "Écran / fréquence >")
+  [[ -n $choice ]] || { log "Aucun choix"; return 0; }
+  mkdir -p "$CFG/hypr"
+  if [[ -f $conf ]]; then cp -f "$conf" "$conf.previous"; else rm -f "$conf.previous"; fi
+  if [[ $choice == "$auto" ]]; then
+    session_monitors force
+    name="tous les écrans"; res="auto"
+  else
+    name=$(awk -F' │ ' '{print $1}' <<<"$choice")
+    res=$(awk -F' │ ' '{print $2}' <<<"$choice" | sed -E 's/ \(actuel\)//; s/ Hz$//; s/ @ /@/')
+    rate=${res#*@}
+    # Fréquence exacte annoncée par l'écran (ex. 143.98 et non 144).
+    res=$(hyprctl monitors all -j | jq -r --arg n "$name" --arg r "${res%@*}" --argjson f "$rate" \
+      '.[] | select(.name == $n) | .availableModes[] | sub("Hz$"; "") | select(startswith($r + "@")) | select(((split("@")[1] | tonumber) - $f) | fabs < 0.01)' | head -1)
+    [[ -n $res ]] || die "Mode introuvable pour $name."
+    monitors_write "$name" "$res"
+    hyprctl reload >/dev/null 2>&1 || true
+  fi
+  log "Écran $name -> $res"
+  sleep 2
+  keep=$(printf '%s\n' "Garder ce réglage" "Annuler (revenir à l’ancien)" | PICK_TIMEOUT=20 pick "Garder ? (retour automatique dans 20 s)")
+  if [[ $keep == "Garder ce réglage" ]]; then
+    rm -f "$conf.previous"
+    notify-send -a "Écrans" "Réglage enregistré" "$name : ${res/@/ à } Hz" 2>/dev/null || true
+    ui "  Réglage enregistré : $name ${res}"
+  else
+    if [[ -f $conf.previous ]]; then mv -f "$conf.previous" "$conf"; else rm -f "$conf"; fi
+    hyprctl reload >/dev/null 2>&1 || true
+    notify-send -a "Écrans" "Ancien réglage remis" 2>/dev/null || true
+    ui "  Ancien réglage remis."
+  fi
 }
 
 # =============================================================================
@@ -3256,6 +3384,7 @@ Usage : ./install.sh [options]
                        sauvegarde, copie, dépendances connues, AZERTY conservé.
                        Ex. : ./install.sh --dotfiles https://github.com/user/dots#branche
   --dotfiles-restore   Annule le dernier --dotfiles (restaure la configuration précédente)
+  --monitors           Choisir résolution et fréquence de chaque écran (aussi : Super+F2)
   -h, --help           Cette aide     --version   Version
 
 Journaux, sauvegardes, rapports : ~/.local/share/hypr-installer/
@@ -3270,6 +3399,7 @@ parse_args() {
       --diagnose) MODE=diagnose ;;
       --repair) MODE=repair; FORCE=1 ;;
       --post-login-check) MODE=post-login-check ;;
+      --monitors) MODE=monitors ;;
       --session-debug) MODE=session-debug ;;
       --first-login) MODE=first-login ;;
       --allow-non-eos) ALLOW_NON_EOS=1 ;;
@@ -3302,6 +3432,12 @@ main() {
     LOG_FILE="$LOG_DIR/session-debug-$RUN_TS.log"
     exec 3>&1 4>&2 5>>"$LOG_FILE"; exec >>"$LOG_FILE" 2>&1
     session_debug
+    exit 0
+  fi
+  if [[ $MODE == monitors ]]; then
+    LOG_FILE="$LOG_DIR/monitors-$RUN_TS.log"
+    exec 3>&1 4>&2 5>>"$LOG_FILE"; exec >>"$LOG_FILE" 2>&1
+    monitors_menu
     exit 0
   fi
   if [[ $MODE == dotfiles || $MODE == dotfiles-restore ]]; then

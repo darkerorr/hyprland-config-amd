@@ -300,7 +300,7 @@ case $1 in
   set-x11-keymap) shift; while [[ $1 == --* ]]; do shift; done; printf "%s\n%s\n" "$(sed -n 1p "$st")" "$1" >"$st" ;;
 esac'
 mock systemctl "$LOGCALL"'
-case " $* " in *" --user is-enabled hypridle"*) exit 1;; esac; exit 0'
+case " $* " in *" --user is-enabled hypridle"*|*" is-enabled --quiet lactd.service "*) exit 1;; esac; exit 0'
 mock uv "$LOGCALL"'
 if [[ $1 == venv ]]; then for a; do d=$a; done
   for a in "$@"; do [[ $a == */.venv ]] && d=$a; done
@@ -348,6 +348,18 @@ case "$1 $2" in
     for a; do p=$a; done; [[ $(cat "$pf" 2>/dev/null) == /usr ]] && { echo "npm error EACCES"; exit 243; }
     : >"$MOCK/npm-$p"; d=$(cat "$pf")/bin; mkdir -p "$d"; printf "#!/bin/sh\nexit 0\n" >"$d/$p"; chmod +x "$d/$p" ;;
 esac'
+mock hyprctl "$LOGCALL"'
+case "$1 $2" in
+  "monitors all") cat "$MOCK/monitors.json" ;;
+  "version "*|"version") echo "Hyprland 0.57.2" ;;
+  *) exit 0 ;;
+esac'
+# fuzzel --dmenu : choisit la 1re ligne contenant le motif de $MOCK/fuzzel-N (N = n° d'appel) ;
+# sans fichier de motif : aucune réponse (comme un délai dépassé).
+mock fuzzel '
+n=$(( $(cat "$MOCK/fuzzel-count" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$MOCK/fuzzel-count"
+in=$(cat); [[ -f $MOCK/fuzzel-$n ]] || exit 1
+grep -F -m1 -- "$(cat "$MOCK/fuzzel-$n")" <<<"$in"'
 for c in node brave gpasswd; do mock "$c" "$LOGCALL"'; echo v22.0.0'; done
 # Commandes interdites (dual boot) : tout appel est consigné et fait échouer le test.
 for c in parted fdisk cfdisk sfdisk mkfs mkfs.ext4 mkfs.fat mkfs.btrfs wipefs sgdisk gdisk grub-install grub-mkconfig \
@@ -359,14 +371,14 @@ done
 fresh_db() {
   rm -rf -- "$MOCK/db"; mkdir -p "$MOCK/db"
   for p in base linux pacman sudo git curl networkmanager firefox endeavouros-keyring archlinux-keyring sddm; do echo 1.0-1 >"$MOCK/db/$p"; done
-  rm -f "$MOCK"/fail-chroot-* "$MOCK"/{fail-qs-commits,archive-root-403,ipv6-broken,locale,syu-block,aur-down,net-down,norepo,calls.log,forbidden.log,pacman.conf.at-syu} "$MOCK"/fail-makepkg-* "$MOCK"/interrupt-* "$MOCK"/npm-* "$MOCK"/verify-fail
+  rm -f "$MOCK"/fail-chroot-* "$MOCK"/{fail-qs-commits,archive-root-403,ipv6-broken,locale,syu-block,aur-down,net-down,norepo,calls.log,forbidden.log,pacman.conf.at-syu} "$MOCK"/fail-makepkg-* "$MOCK"/interrupt-* "$MOCK"/npm-* "$MOCK"/verify-fail "$MOCK"/fuzzel-*
 }
 reset_all() { fresh_db; mk_sysroot; rm -rf -- "$H"; mkdir -p "$H"; }
 
-RUN_N=0
+RUN_N=0; RUN_ENV=()
 run_installer() {   # run_installer <options…> ; RC et OUT définis
   RUN_N=$((RUN_N + 1)); OUT="$T/out-$RUN_N.txt"; RC=0
-  env -i PATH="$BIN:/usr/bin:/bin" HOME="$H" USER="$USER" LANG=C.UTF-8 TMPDIR="$T" \
+  env -i PATH="$BIN:/usr/bin:/bin" HOME="$H" USER="$USER" LANG=C.UTF-8 TMPDIR="$T" "${RUN_ENV[@]}" \
     HYPR_INSTALLER_TEST=1 HYPR_INSTALLER_SYSROOT="$SR" MOCK="$MOCK" END4_FIX="$END4_FIX" \
     E2E_END4_COMMIT="$E2E_END4_COMMIT" E2E_END4_TAG="$E2E_END4_TAG" E2E_SHAPES_COMMIT="$E2E_SHAPES_COMMIT" \
     bash -c 'echo $$ >"$MOCK/main.pid"; exec bash "$0" "$@"' "$T/install.sh" "$@" >"$OUT" 2>&1 </dev/null || RC=$?
@@ -686,6 +698,40 @@ run_installer --yes --dotfiles "$DF"
 check "S17 organisation inconnue : refus sans rien modifier" bash -c "[[ $RC -ne 0 ]] && grep -q 'Organisation du dépôt non reconnue' '$OUT' && [[ ! -e '$H/.config/random' ]]"
 run_installer --yes --dotfiles "ftp://exemple/x"
 check "S17 lien invalide refusé" bash -c "[[ $RC -ne 0 ]] && grep -q 'Lien invalide' '$OUT'"
+
+# =============================================================================
+# S18. Super+F2 : choix de la fréquence, confirmation, retour automatique ;
+#      Super+F1 ; compléments graphiques (multilib, LACT)
+# =============================================================================
+reset_all
+printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' >>"$SR/etc/pacman.conf"
+run_installer --yes
+check "S18 Super+F1 (aide) et Super+F2 (écrans) définis" bash -c "grep -q '\"SUPER + F1\", hl.dsp.global(\"quickshell:cheatsheetToggle\")' '$H/.config/hypr/custom/keybinds.lua' && grep -q '\"SUPER + F2\".*--monitors' '$H/.config/hypr/custom/keybinds.lua'"
+check "S18 pilotes 32 bits (multilib) + LACT installés, lactd activé" bash -c "[[ -f '$MOCK/db/lib32-vulkan-radeon' && -f '$MOCK/db/lib32-mesa' && -f '$MOCK/db/lact' ]] && grep -q 'enable --now lactd.service' '$MOCK/calls.log'"
+check "S18 Brave : accélération vidéo + Wayland" grep -q 'AcceleratedVideoDecodeLinuxGL' "$H/.config/brave-flags.conf"
+cat >"$MOCK/monitors.json" <<'EOJ'
+[{"name":"DP-1","description":"BenQ XL2411","width":1920,"height":1080,"refreshRate":60.0,
+  "availableModes":["1920x1080@143.98Hz","1920x1080@119.98Hz","1920x1080@60.00Hz","1280x720@60.00Hz"]},
+ {"name":"HDMI-A-1","description":"Samsung","width":1920,"height":1080,"refreshRate":60.0,
+  "availableModes":["1920x1080@75.00Hz","1920x1080@60.00Hz"]}]
+EOJ
+RUN_ENV=(HYPRLAND_INSTANCE_SIGNATURE=test WAYLAND_DISPLAY=wayland-1)
+rm -f "$MOCK"/fuzzel-*; echo '143.98 Hz' >"$MOCK/fuzzel-1"; echo 'Garder' >"$MOCK/fuzzel-2"
+run_installer --monitors
+check "S18 144 Hz choisi et gardé" bash -c "[[ $RC -eq 0 ]] && grep -q 'output = \"DP-1\", mode = \"1920x1080@143.98\"' '$H/.config/hypr/monitors.lua' && grep -q '^hyprctl reload' '$MOCK/calls.log'"
+rm -f "$MOCK"/fuzzel-*; echo 'HDMI-A-1 │ 1920x1080 @ 75 Hz' >"$MOCK/fuzzel-1"; echo 'Garder' >"$MOCK/fuzzel-2"
+run_installer --monitors
+check "S18 second écran réglé, premier conservé" bash -c "grep -q 'mode = \"1920x1080@143.98\"' '$H/.config/hypr/monitors.lua' && grep -q 'output = \"HDMI-A-1\", mode = \"1920x1080@75.00\"' '$H/.config/hypr/monitors.lua'"
+cp "$H/.config/hypr/monitors.lua" "$T/monitors.before"
+rm -f "$MOCK"/fuzzel-*; echo '1280x720 @ 60 Hz' >"$MOCK/fuzzel-1"
+run_installer --monitors
+check "S18 sans confirmation : ancien réglage remis automatiquement" bash -c "[[ $RC -eq 0 ]] && cmp -s '$H/.config/hypr/monitors.lua' '$T/monitors.before' && [[ ! -e '$H/.config/hypr/monitors.lua.previous' ]]"
+rm -f "$MOCK"/fuzzel-*; echo 'Automatique' >"$MOCK/fuzzel-1"; echo 'Garder' >"$MOCK/fuzzel-2"; rm -f "$H/.config/hypr/monitors.lua"
+run_installer --monitors
+check "S18 automatique : fréquence maximale de chaque écran" bash -c "grep -q '1920x1080@143.98' '$H/.config/hypr/monitors.lua' && grep -q '1920x1080@75.00' '$H/.config/hypr/monitors.lua'"
+RUN_ENV=()
+run_installer --monitors
+check "S18 hors session : refus clair" bash -c "[[ $RC -ne 0 ]] && grep -q 'Super+F2' '$OUT'"
 
 echo
 echo "Résultat : $PASS réussis, $FAILN échoués"
