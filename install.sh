@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="2.0.2"
+readonly INSTALLER_VERSION="2.0.3"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
 readonly CHECKPOINT_SCHEMA=2
 readonly MAIN_PID=$$
@@ -498,6 +498,10 @@ handle_failure() {
       ((${#causes[@]} > 1)) && printf '    Autres causes : %s\n' "${causes[@]:1}"
       printf '\n  %sDernières lignes de la commande en échec :%s\n' "$C_DIM" "$C_RST"
       grep -v '^\[[0-9-]* [0-9:]*\] ' "$SPIN_OUTPUT_FILE" | tail -n 15 | sed 's/^/    /'
+    else
+      # Erreur hors commande suivie (rsync, cp, mkdir…) : son message est dans le journal.
+      printf '\n  %sDernières lignes du journal :%s\n' "$C_DIM" "$C_RST"
+      grep -vE '^\[[0-9-]* [0-9:]*\] (INFO|OK|EXEC|---)' "$LOG_FILE" 2>/dev/null | tail -n 8 | sed 's/^/    /'
     fi
     printf '\n    Journal complet : %s\n' "${LOG_FILE/#$HOME/\~}"
     printf '\n  Les étapes terminées sont mémorisées et revérifiées : relancez ./install.sh pour reprendre.\n'
@@ -1022,6 +1026,73 @@ confirm_plan() {
     FAILURE_HANDLED=1; exit 1
   fi
   start_sudo_keepalive
+}
+
+# Nettoie les restes des exécutions précédentes (versions antérieures comprises)
+# AVANT de reprendre, pour qu'aucun vestige ne perturbe la nouvelle exécution.
+# Ne supprime JAMAIS : les configurations sauvegardées (backups/), les paquets
+# utiles, ni quoi que ce soit hors des dossiers de l'installateur, sauf les
+# paquets obsolètes listés ci-dessous, et seulement après confirmation.
+readonly -a OBSOLETE_PKGS=(38c3-styles html2markdown otf-space-grotesk)
+cleanup_previous_runs() {
+  local n=0 f key i base keep
+  key=$(checkpoint_key)
+  # 1. États obsolètes : points de reprise d'une autre version, échecs anciens.
+  for f in "$STATE_DIR"/step-*.done; do
+    [[ $(<"$f") == "$key" ]] || { rm -f -- "$f"; n=$((n + 1)); }
+  done
+  for f in "$STATE_DIR"/step-*.failed; do
+    grep -qx "version=$INSTALLER_VERSION" "$f" || { rm -f -- "$f"; n=$((n + 1)); }
+  done
+  rm -f -- "$STATE_DIR/chroot.prepared-run" "$PINS_LOCK.tmp"
+  # 2. Dossiers temporaires d'exécutions interrompues.
+  for f in "${TMPDIR:-/tmp}"/hypr-installer.*; do
+    [[ -d $f && -O $f && $f != "$TMP_DIR" ]] || continue
+    rm -rf -- "$f"; n=$((n + 1))
+  done
+  # 3. Téléchargements partiels et constructions régénérables.
+  while IFS= read -r f; do rm -f -- "$f"; n=$((n + 1)); done < <(find "$CACHE_DIR" -name '*.part' -type f 2>/dev/null)
+  for f in "$BUILD_DIR/meta" "$BUILD_DIR/local"; do
+    [[ -d $f ]] && { rm -rf -- "$f"; n=$((n + 1)); }
+  done
+  # 4. Dépôts AUR / Arch qui ne font plus partie de la configuration actuelle.
+  for f in "$BUILD_DIR"/aur/*; do
+    [[ -d $f ]] || continue
+    base=${f##*/}; keep=0
+    for i in "${AUR_PINS[@]}"; do [[ ${i%%|*} == "$base" ]] && keep=1; done
+    ((keep)) || { rm -rf -- "$f"; n=$((n + 1)); log "Nettoyage : ancien dépôt AUR $base"; }
+  done
+  for f in "$BUILD_DIR"/arch/*; do
+    [[ -d $f ]] || continue
+    is_pinned "${f##*/}" || { rm -rf -- "$f"; n=$((n + 1)); }
+  done
+  # 5. Paquets recompilés pour d'autres versions que celles épinglées.
+  for f in "$PKG_CACHE"/built/*.pkg.tar*; do
+    [[ -f $f ]] || continue
+    keep=0
+    for i in "${PIN_ORDER[@]}"; do [[ ${f##*/} == "$i-${PIN_VER[$i]}${LOCAL_REL_SUFFIX}-"* ]] && keep=1; done
+    ((keep)) || { rm -f -- "$f"; n=$((n + 1)); }
+  done
+  # 6. Journaux et rapports : on garde les 20 plus récents ; sauvegardes vides.
+  for f in "$LOG_DIR" "$REPORT_DIR"; do
+    while IFS= read -r i; do rm -f -- "$i"; n=$((n + 1)); done \
+      < <(find "$f" -maxdepth 1 -type f -name '*-2*' -printf '%T@ %p\n' 2>/dev/null | sort -rn | tail -n +21 | cut -d' ' -f2-)
+  done
+  find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null || true
+  # 7. Ancienne copie utilisateur de Space Grotesk (versions ≤ 1.2.9).
+  local legacy="${XDG_DATA_HOME:-$HOME/.local/share}/fonts/space-grotesk"
+  if [[ -f $legacy/OFL.txt ]] && ! find "$legacy" -type f ! -name '*.otf' ! -name OFL.txt | grep -q .; then
+    rm -rf -- "${legacy:?}"; n=$((n + 1))
+  fi
+  # 8. Paquets installés par d'anciennes versions et devenus inutiles.
+  local -a old=()
+  for i in "${OBSOLETE_PKGS[@]}"; do pkg_installed "$i" && old+=("$i"); done
+  if ((${#old[@]})) && ask_yes_no "Paquets installés par une ancienne version de l’installateur, devenus inutiles : ${old[*]}. Les retirer ?"; then
+    if spin "Retrait des paquets obsolètes : ${old[*]}" sudo pacman -Rns --noconfirm "${old[@]}"; then n=$((n + ${#old[@]}))
+    else warn "Paquets obsolètes non retirés (encore requis par un autre paquet) : ${old[*]}"; fi
+  fi
+  if ((n)); then ok "Restes des exécutions précédentes nettoyés ($n élément(s))"; else log "Aucun reste d’exécution précédente"; fi
+  return 0
 }
 
 # =============================================================================
@@ -1727,23 +1798,38 @@ backup_existing_config() {
   else info "Aucune configuration existante à sauvegarder"; fi
 }
 
+# Copie un dossier en créant TOUS les dossiers parents (rsync ne crée que le
+# dernier niveau) ; l'erreur exacte de rsync est reportée en cas d'échec.
+sync_tree() {   # sync_tree <source/> <destination/> [options rsync…]
+  local src=$1 dst=$2 out=""; shift 2
+  [[ -d $src ]] || die "Dossier source absent : $src (release end-4 incomplète ?)"
+  mkdir -p -- "$dst" || die "Création impossible de $dst (droits ? espace disque ?)"
+  if ! out=$(rsync -a "$@" -- "$src" "$dst" 2>&1); then
+    log "rsync : $out"
+    LAST_CAUSE=$(grep -m1 -E 'rsync:|error' <<<"$out" || tail -n1 <<<"$out")
+    die "Copie impossible de $src vers $dst : $LAST_CAUSE"
+  fi
+}
+
 # Reproduit sdata/subcmd-install/3.files-legacy.sh (sans invite interactive),
 # + correctif : hypr/hyprlock/ est aussi déployé (référencé par hyprlock.conf).
 deploy_end4_files() {
   local src="$END4_DIR/dots" item name firstrun=0 f
   [[ -f $CFG/illogical-impulse/installed_true ]] || firstrun=1
-  mkdir -p "$CFG" "${XDG_DATA_HOME:-$HOME/.local/share}" "$HOME/.local/bin" "${XDG_CACHE_HOME:-$HOME/.cache}"
+  mkdir -p "$CFG/hypr" "${XDG_DATA_HOME:-$HOME/.local/share}" "$HOME/.local/bin" "${XDG_CACHE_HOME:-$HOME/.cache}"
   for item in "$src"/.config/*; do
     name=$(basename "$item")
     case $name in quickshell|fish|hypr|fontconfig) continue ;; esac
-    if [[ -d $item ]]; then rsync -a --delete "$item/" "$CFG/$name/"; else cp -f "$item" "$CFG/$name"; fi
+    if [[ -d $item ]]; then sync_tree "$item/" "$CFG/$name/" --delete; else cp -f -- "$item" "$CFG/$name"; fi
   done
-  rsync -a "$src/.local/share/konsole/" "${XDG_DATA_HOME:-$HOME/.local/share}/konsole/"
-  rsync -a --delete "$src/.config/quickshell/" "$CFG/quickshell/"
-  rsync -a --delete --exclude conf.d "$src/.config/fish/" "$CFG/fish/"
-  rsync -a --delete "$src/.config/fontconfig/" "$CFG/fontconfig/"
-  rsync -a --delete "$src/.config/hypr/hyprland/" "$CFG/hypr/hyprland/"
-  rsync -a --delete "$src/.config/hypr/hyprlock/" "$CFG/hypr/hyprlock/"
+  sync_tree "$src/.local/share/konsole/" "${XDG_DATA_HOME:-$HOME/.local/share}/konsole/"
+  sync_tree "$src/.config/quickshell/" "$CFG/quickshell/" --delete
+  sync_tree "$src/.config/fish/" "$CFG/fish/" --delete --exclude conf.d
+  sync_tree "$src/.config/fontconfig/" "$CFG/fontconfig/" --delete
+  # ~/.config/hypr n'existe pas sur un système neuf : rsync ne crée que le
+  # dernier niveau de dossier (cause du code 11 « mkdir failed » en 2.0.2).
+  sync_tree "$src/.config/hypr/hyprland/" "$CFG/hypr/hyprland/" --delete
+  sync_tree "$src/.config/hypr/hyprlock/" "$CFG/hypr/hyprlock/" --delete
   for f in hyprlock.conf monitors.conf workspaces.conf hypridle.conf; do
     if [[ -f $CFG/hypr/$f ]] && ! cmp -s "$src/.config/hypr/$f" "$CFG/hypr/$f"; then
       if ((firstrun)); then mv -f "$CFG/hypr/$f" "$CFG/hypr/$f.old"; cp -f "$src/.config/hypr/$f" "$CFG/hypr/$f"
@@ -1751,7 +1837,7 @@ deploy_end4_files() {
     else cp -f "$src/.config/hypr/$f" "$CFG/hypr/$f"; fi
   done
   cp -f "$src/.config/hypr/hyprland.conf" "$CFG/hypr/hyprland.conf"
-  [[ -d $HYPR_CUSTOM ]] || rsync -a "$src/.config/hypr/custom/" "$HYPR_CUSTOM/"
+  [[ -d $HYPR_CUSTOM ]] || sync_tree "$src/.config/hypr/custom/" "$HYPR_CUSTOM/"
   install -Dm644 "$src/.local/share/icons/illogical-impulse.svg" "${XDG_DATA_HOME:-$HOME/.local/share}/icons/illogical-impulse.svg"
   mkdir -p "$CFG/illogical-impulse"
   touch "$CFG/illogical-impulse/installed_true"
@@ -1763,7 +1849,7 @@ deploy_end4_files() {
 install_google_sans_flex() {
   local dir="$BUILD_DIR/google-sans-flex" target="${XDG_DATA_HOME:-$HOME/.local/share}/fonts/illogical-impulse-google-sans-flex"
   git_checkout_pinned "$GSF_REPO" "$dir" "$GSF_COMMIT"
-  mkdir -p "$target"; rsync -a --exclude .git "$dir/" "$target/"
+  sync_tree "$dir/" "$target/" --exclude .git
   spin "Mise à jour du cache des polices" fc-cache -f
 }
 
@@ -2829,7 +2915,7 @@ main() {
     exit $((CHECK_FAIL > 0))
   fi
 
-  run_step 1 preflight resolve_versions confirm_plan
+  run_step 1 preflight resolve_versions confirm_plan cleanup_previous_runs
   run_step 2 detect_hardware
   run_step 3 install_system_packages
   run_step 4 install_graphics

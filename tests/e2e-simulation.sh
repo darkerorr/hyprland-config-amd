@@ -300,8 +300,12 @@ mock fc-match 'echo "Space Grotesk"'
 mock xdg-user-dir 'echo "$HOME/Pictures"'
 mock rsync '
 del=0; ex=(); pos=()
-while (($#)); do case $1 in --delete) del=1; shift;; --exclude) ex+=("$2"); shift 2;; -*) shift;; *) pos+=("$1"); shift;; esac; done
+while (($#)); do case $1 in --delete) del=1; shift;; --exclude) ex+=("$2"); shift 2;; --) shift;; -*) shift;; *) pos+=("$1"); shift;; esac; done
 s=${pos[0]}; d=${pos[1]}
+# Comme le vrai rsync : seul le dernier niveau du dossier cible est créé.
+if [[ ! -d ${d%/} && ! -d $(dirname "${d%/}") ]]; then
+  echo "rsync: [Receiver] mkdir \"${d%/}\" failed: No such file or directory (2)" >&2
+  echo "rsync error: error in file IO (code 11)" >&2; exit 11; fi
 ((del)) && rm -rf "$d"; mkdir -p "$d"; cp -a "$s/." "$d/"
 for e in "${ex[@]}"; do rm -rf "$d/$e"; done'
 mock df 'printf "Avail\n 200G\n"'
@@ -478,6 +482,26 @@ run_installer --yes
 check "S10 archive 403 + IPv6 cassé : installation terminée" test "$RC" -eq 0
 ((RC == 0)) || show_out
 check "S10 IPv4 forcé pour les téléchargements" grep -q '^curl .*-4' "$MOCK/calls.log"
+
+# =============================================================================
+# S11. Restes d'une ancienne version : nettoyés avant la reprise
+# =============================================================================
+reset_all
+C="$H/.cache/hypr-installer"; mkdir -p "$STATE" "$C/build/aur/38c3-styles/.git" "$C/build/meta/illogical-impulse-fonts-themes" "$C/pkgs/built" "$C/pkgs/ala" "$H/.local/share/fonts/space-grotesk" "$T/hypr-installer.OLD123"
+echo ancienne-cle >"$STATE/step-6.done"; printf 'version=1.2.9\ncode=8\n' >"$STATE/step-3.failed"
+echo x >"$C/pkgs/built/hyprgraphics-0.4.0-1.1-x86_64.pkg.tar.zst"; echo x >"$C/pkgs/ala/hyprland-0.54.3-4-x86_64.pkg.tar.zst.part"
+echo x >"$H/.local/share/fonts/space-grotesk/OFL.txt"; echo x >"$H/.local/share/fonts/space-grotesk/SpaceGrotesk.otf"
+echo 1.0-1 >"$MOCK/db/html2markdown"; echo 1.0-1 >"$MOCK/db/38c3-styles"
+run_installer --yes
+check "S11 installation après restes d'une ancienne version : code 0" test "$RC" -eq 0
+((RC == 0)) || show_out
+check "S11 ancien dépôt AUR 38c3-styles supprimé" test ! -e "$C/build/aur/38c3-styles"
+check "S11 paquet recompilé obsolète supprimé" test ! -e "$C/pkgs/built/hyprgraphics-0.4.0-1.1-x86_64.pkg.tar.zst"
+check "S11 téléchargement partiel supprimé" test ! -e "$C/pkgs/ala/hyprland-0.54.3-4-x86_64.pkg.tar.zst.part"
+check "S11 dossier temporaire orphelin supprimé" test ! -e "$T/hypr-installer.OLD123"
+check "S11 ancienne police utilisateur supprimée" test ! -e "$H/.local/share/fonts/space-grotesk"
+check "S11 paquets obsolètes retirés" bash -c "[[ ! -f '$MOCK/db/html2markdown' && ! -f '$MOCK/db/38c3-styles' ]]"
+check "S11 nettoyage annoncé" grep -q 'Restes des exécutions précédentes nettoyés' "$OUT"
 
 # =============================================================================
 # S9. Dépendance AUR absente des dépôts : arrêt AVANT makepkg, cause explicite
