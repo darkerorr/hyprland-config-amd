@@ -270,7 +270,7 @@ pass "pin drift is rejected after restoration"
 
 # --- --session-debug : recherche par dichotomie du fichier qui fait planter -----
 (
-  CFG="$TEST_DIR/cfg"; mkdir -p "$CFG/hypr/custom"
+  mkdir -p "$CFG/hypr/custom"
   printf 'source=custom/a.conf\nsource=custom/b.conf\nsource=custom/c.conf\nsource=custom/d.conf\n' >"$CFG/hypr/hyprland.conf"
   for f in a b c d; do echo "# $f" >"$CFG/hypr/custom/$f.conf"; done
   echo CRASH >>"$CFG/hypr/custom/c.conf"
