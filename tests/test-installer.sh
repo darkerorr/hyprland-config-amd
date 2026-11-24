@@ -267,3 +267,22 @@ if assert_pins_intact; then
   fail "pin drift was accepted after restoration"
 fi
 pass "pin drift is rejected after restoration"
+
+# --- --session-debug : recherche par dichotomie du fichier qui fait planter -----
+(
+  CFG="$TEST_DIR/cfg"; mkdir -p "$CFG/hypr/custom"
+  printf 'source=custom/a.conf\nsource=custom/b.conf\nsource=custom/c.conf\nsource=custom/d.conf\n' >"$CFG/hypr/hyprland.conf"
+  for f in a b c d; do echo "# $f" >"$CFG/hypr/custom/$f.conf"; done
+  echo CRASH >>"$CFG/hypr/custom/c.conf"
+  hypr_trial() {
+    local f
+    while read -r f; do grep -q CRASH "$CFG/hypr/$f" && return 1; done < <(sed -nE 's/^[[:space:]]*source[[:space:]]*=[[:space:]]*//p' "$1")
+    return 0
+  }
+  ui() { :; }
+  declare -a ev=()
+  session_bisect_config "$TEST_DIR/bisect.out" ev
+  [[ ${ev[*]} == *"custom/c.conf"* ]] || fail "bisection did not find the crashing file: ${ev[*]}"
+  [[ ! -e $CFG/hypr/.hypr-installer-trial.conf ]] || fail "trial config not cleaned"
+) || exit 1
+pass "session-debug bisection finds the crashing config file"

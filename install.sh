@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="2.0.5"
+readonly INSTALLER_VERSION="2.0.6"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
 readonly CHECKPOINT_SCHEMA=2
 readonly MAIN_PID=$$
@@ -2866,6 +2866,54 @@ first_login() {
 # À lancer depuis un TTY (Ctrl+Alt+F3) quand l'écran de connexion revient après
 # le mot de passe. Rassemble tout ce qui existe sur le dernier démarrage de
 # session, en tire les causes connues, et peut tenter un lancement contrôlé.
+# Lance Hyprland (sans start-hyprland) avec une configuration donnée pendant
+# quelques secondes. 0 = toujours en vie, 1 = arrêt/plantage.
+hypr_trial() {   # hypr_trial <fichier de configuration> <journal>
+  local rc=0
+  HYPR_INSTALLER_SESSION_TEST=1 timeout 10 Hyprland -c "$1" >"$2" 2>&1 </dev/tty || rc=$?
+  ((rc == 124))
+}
+
+# Isole la cause d'un plantage : configuration vide, puis recherche par
+# dichotomie du fichier « source = » qui déclenche l'arrêt.
+session_bisect_config() {   # session_bisect_config <rapport> <nom du tableau d'indices>
+  local out=$1; local -n ev=$2
+  local dir="$CFG/hypr" main="$CFG/hypr/hyprland.conf" t="$CFG/hypr/.hypr-installer-trial.conf" tl="$TMP_DIR/trial.log"
+  local -a srcs=(); local n lo hi mid i culprit="" line
+  ui "  Recherche de la cause (plusieurs lancements de 10 s, l’écran va basculer)…"
+  printf 'monitor = , preferred, auto, 1\n' >"$t"
+  if ! hypr_trial "$t" "$tl"; then
+    ev+=("Hyprland plante même avec une configuration VIDE : binaire ou bibliothèques en cause -> ./install.sh --repair")
+    { printf '\n--- essai configuration vide : plantage ---\n'; tail -n 30 "$tl"; } >>"$out"
+    rm -f -- "$t"; return 0
+  fi
+  ev+=("Hyprland fonctionne avec une configuration vide : la cause est dans la configuration.")
+  mapfile -t srcs < <(grep -nE '^[[:space:]]*source[[:space:]]*=' "$main" | cut -d: -f1)
+  n=${#srcs[@]}
+  trial_upto() {   # n'active que les k premiers « source = »
+    local k=$1 j
+    cp -f -- "$main" "$t"
+    for ((j = k; j < n; j++)); do sed -i "${srcs[j]}s/^/# hypr-installer-test: /" "$t"; done
+    hypr_trial "$t" "$tl"
+  }
+  if ! trial_upto 0; then
+    ev+=("Plantage causé par hyprland.conf lui-même (hors fichiers inclus).")
+  else
+    lo=1; hi=$n
+    while ((lo < hi)); do
+      mid=$(( (lo + hi) / 2 ))
+      if trial_upto "$mid"; then lo=$((mid + 1)); else hi=$mid; fi
+    done
+    line=$(sed -n "${srcs[lo-1]}p" "$main")
+    culprit=$(sed -E 's/^[[:space:]]*source[[:space:]]*=[[:space:]]*//' <<<"$line")
+    ev+=("Fichier qui provoque le plantage : $culprit (ligne ${srcs[lo-1]} de hyprland.conf)")
+    { printf '\n--- fichier en cause : %s ---\n' "$culprit"; cat "$dir/$culprit" 2>&1 | head -n 120
+      printf '\n--- journal de l’essai fautif ---\n'; trial_upto "$lo" || true; grep -m1 -B25 -E 'terminate called|received signal' "$tl" || tail -n 25 "$tl"; } >>"$out" 2>&1
+  fi
+  rm -f -- "$t"
+  return 0
+}
+
 newest_file() {   # le fichier le plus récent parmi les arguments existants
   local f best=""
   for f in "$@"; do [[ -f $f ]] || continue; [[ -z $best || $f -nt $best ]] && best=$f; done
@@ -2919,7 +2967,12 @@ session_debug() {
     HYPR_INSTALLER_SESSION_TEST=1 timeout 20 "$bin" >"$lt" 2>&1 </dev/tty || trc=$?
     { printf '\n--- lancement de test depuis le TTY (%s, code %s ; 124 = toujours en vie après 20 s) ---\n' "$bin" "$trc"; tail -n 60 "$lt"; } >>"$out"
     if ((trc == 124)); then evidence+=("Hyprland démarre normalement depuis un TTY : le problème vient du lancement par l’écran de connexion (SDDM).")
-    else evidence+=("Hyprland s’arrête aussi depuis un TTY (code $trc) : le problème est dans Hyprland ou sa configuration.")
+    else
+      evidence+=("Hyprland s’arrête aussi depuis un TTY (code $trc) : le problème est dans Hyprland ou sa configuration.")
+      # Ce que Hyprland faisait juste avant de s'arrêter.
+      { printf '\n--- contexte avant l’arrêt ---\n'
+        grep -m1 -B25 -E 'terminate called|received signal|Segmentation' "$lt" || tail -n 25 "$lt"; } >>"$out"
+      session_bisect_config "$out" evidence
     fi
   fi
 
@@ -2944,6 +2997,11 @@ session_debug() {
     ui "  Aucune cause connue reconnue automatiquement : voir les extraits du rapport."
   fi
   ui ""
+  if grep -q -- '--- contexte avant l’arrêt' "$out"; then
+    ui "  ${C_B}Dernières actions de Hyprland avant l’arrêt :${C_RST}"
+    sed -n '/--- contexte avant l’arrêt ---/,/^--- /p' "$out" | grep -v '^---' | tail -n 12 | cut -c1-150 | sed 's/^/    /' >&3
+    ui ""
+  fi
   ui "  ${C_B}Extraits utiles :${C_RST}"
   grep -iE 'error|fail|fatal|not found|undefined|abort|segfault|signal|cannot|couldn' "$out" | grep -viE 'warning|0 errors' | tail -n 15 | sed 's/^/    /' >&3 || true
   ui ""
