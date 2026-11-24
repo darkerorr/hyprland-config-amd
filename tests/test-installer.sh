@@ -280,9 +280,9 @@ pass "pin drift is rejected after restoration"
     return 0
   }
   ui() { :; }
-  declare -a ev=()
-  session_bisect_config "$TEST_DIR/bisect.out" ev
-  [[ ${ev[*]} == *"custom/c.conf"* ]] || fail "bisection did not find the crashing file: ${ev[*]}"
+  declare -a found=()
+  session_bisect_config "$TEST_DIR/bisect.out" found
+  [[ ${found[*]} == *"custom/c.conf"* ]] || fail "bisection did not find the crashing file: ${found[*]}"
   [[ ! -e $CFG/hypr/.hypr-installer-trial.conf ]] || fail "trial config not cleaned"
 ) || exit 1
 pass "session-debug bisection finds the crashing config file"
