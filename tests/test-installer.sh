@@ -236,3 +236,23 @@ pass "step failure is persisted with code and cause"
   [[ ! -e $CFG/hypr/.hypr-installer-trial.conf ]] || fail "trial config not cleaned"
 ) || exit 1
 pass "session-debug bisection finds the crashing config file"
+
+(
+  for p in grub grub-btrfs linux linux-zen linux-firmware efibootmgr os-prober nvidia-dkms mkinitcpio systemd pacman; do
+    [[ $p =~ $DF_PKG_DENY ]] || fail "dotfiles: $p should be denied"
+  done
+  for p in waybar rofi kitty swaync python-pywal linuxdeploy-bin; do
+    [[ ! $p =~ $DF_PKG_DENY ]] || fail "dotfiles: $p should be allowed"
+  done
+) || exit 1
+pass "dotfiles never install boot/kernel/disk packages"
+
+(
+  r="$TEST_DIR/dots"; mkdir -p "$r/dots/.config/hypr" "$r/dots/.config/waybar" "$r/.git" "$r/dots/.local/share/hypr-installer"
+  : >"$r/dots/.config/hypr/hyprland.lua"; : >"$r/dots/.ssh"; : >"$r/setup.sh"
+  dotfiles_plan "$r"
+  [[ " ${DF_DST[*]} " == *" $CFG/hypr "* && " ${DF_DST[*]} " == *" $CFG/waybar "* ]] || fail "dots/.config layout not detected: ${DF_DST[*]}"
+  [[ " ${DF_DST[*]} " != *"/.ssh "* && " ${DF_DST[*]} " != *"hypr-installer"* ]] || fail "forbidden destination planned: ${DF_DST[*]}"
+  [[ ${DF_SCRIPTS[*]} == *setup.sh* ]] || fail "repository script not reported"
+) || exit 1
+pass "dotfiles layout detection (end-4 style) excludes .ssh and installer data"

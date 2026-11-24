@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="3.0.0"
+readonly INSTALLER_VERSION="3.1.0"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
 readonly CHECKPOINT_SCHEMA=4
 readonly MAIN_PID=$$
@@ -43,6 +43,20 @@ readonly -a QS_FALLBACKS=(
   "9b0f339b19057f4731bf3b48293307d7ef241671|master 2026-10-17"   # + 1c1cc91 (types MOC qualifiés)
 )
 readonly QS_MIRROR_URL="https://github.com/quickshell-mirror/quickshell.git"
+# --- Étape 12 : applications, développement, IA (liste modifiable) ----------
+readonly -a DEV_PKGS=(
+  nodejs npm pnpm python python-pip python-pipx git-lfs github-cli
+  jq ripgrep fd bat neovim tmux code docker docker-compose docker-buildx
+)
+# Paquets AUR suivis à leur DERNIÈRE version (un navigateur doit recevoir ses
+# correctifs de sécurité) ; mises à jour ultérieures : yay -Syu.
+readonly -a AUR_LATEST=("brave-bin|brave-bin")
+readonly -a NPM_GLOBAL=(freebuff)                     # installés dans ~/.local (sans sudo)
+readonly CLAUDE_INSTALL_URL="https://claude.ai/install.sh"   # installateur officiel (mises à jour automatiques)
+readonly SKILLS_REPO="https://github.com/anthropics/skills.git"
+readonly SKILLS_COMMIT="e4bb5d960d87126ff3b3a8af1a104b7db67560ba"   # 2026-11-16
+readonly SKILLS_DIR="$HOME/.claude/skills"
+readonly SKILL_MARK=".hypr-installer-managed"
 # --- Police Google Sans Flex (end-4 la clone sur "main" : on l'épingle) -------
 readonly GSF_REPO="https://github.com/end-4/google-sans-flex.git"
 readonly GSF_COMMIT="251aa5abd30496368f634e54ce2a508fe5a2fdfa"
@@ -224,7 +238,7 @@ BACKUP_DIR="$BACKUP_ROOT/$RUN_TS"
 TMP_DIR=""
 
 MODE="install"          # install | diagnose | repair | first-login | post-login-check
-ASSUME_YES=0 FORCE=0 ALLOW_NON_EOS=0 ALLOW_OTHER_GPU=0 NO_REBOOT_PROMPT=0
+ASSUME_YES=0 FORCE=0 ALLOW_NON_EOS=0 ALLOW_OTHER_GPU=0 NO_REBOOT_PROMPT=0 NO_DEV=0 DOTFILES_URL=""
 SUDO_KEEPALIVE_PID="" SPIN_PID=""
 CURRENT_STEP=0
 PINS_RESTORED=0          # 1 dès que la pile épinglée installée est conforme au verrou
@@ -240,9 +254,10 @@ declare -i CHECK_FAIL=0 CHECK_WARN=0 CHECK_PASS=0
 readonly -a STEP_TITLES=("" "System verification" "Hardware detection" "Package installation"
   "AMD graphics setup" "Hyprland installation" "End-4 installation" "Quickshell setup"
   "AZERTY configuration" "Keyboard shortcuts" "Desktop configuration"
-  "Services configuration" "Final validation")
-declare -a STEP_STATUS=("" WAITING WAITING WAITING WAITING WAITING WAITING WAITING WAITING WAITING WAITING WAITING WAITING)
-declare -a STEP_WARN=(0 0 0 0 0 0 0 0 0 0 0 0 0)
+  "Services configuration" "Apps, dev & AI tools" "Final validation")
+readonly LAST_STEP=13
+declare -a STEP_STATUS=("" WAITING WAITING WAITING WAITING WAITING WAITING WAITING WAITING WAITING WAITING WAITING WAITING WAITING)
+declare -a STEP_WARN=(0 0 0 0 0 0 0 0 0 0 0 0 0 0)
 
 # Informations détectées
 OS_ID="" OS_NAME="" CPU_MODEL="" GPU_LINES="" GPU_DRIVER="" RAM_GB=0 HAS_AMD_GPU=0 HAS_NVIDIA_GPU=0
@@ -316,11 +331,11 @@ draw_dashboard() {
   printf '  %s│%s  %sPROGRESSION DE L’INSTALLATION%s                               %s│%s\n' "$C_DIM" "$C_RST" "$C_B" "$C_RST" "$C_DIM" "$C_RST" >&3
   printf '  %s╰──────────────────────────────────────────────────────────────╯%s\n' "$C_DIM" "$C_RST" >&3
   local i done_count=0
-  for i in $(seq 1 12); do
+  for i in $(seq 1 "$LAST_STEP"); do
     case ${STEP_STATUS[i]} in DONE|CACHED|WARN) ((done_count+=1)) ;; esac
   done
-  printf '  %sÉtapes terminées :%s %s/12\n\n' "$C_DIM" "$C_RST" "$done_count" >&3
-  for i in $(seq 1 12); do
+  printf '  %sÉtapes terminées :%s %s/%s\n\n' "$C_DIM" "$C_RST" "$done_count" "$LAST_STEP" >&3
+  for i in $(seq 1 "$LAST_STEP"); do
     printf '  %s%02d%s  %-29s %s\n' "$C_DIM" "$i" "$C_RST" "${STEP_TITLES[i]}" "$(status_label "${STEP_STATUS[i]}")" >&3
   done
   ui ""
@@ -491,6 +506,8 @@ on_exit() {
   if ((rc != 0 && FAILURE_HANDLED == 0)) && [[ $BASHPID == "$MAIN_PID" ]] \
      && [[ $MODE == install || $MODE == repair ]]; then
     handle_failure "$rc"
+  elif ((rc != 0)) && [[ $BASHPID == "$MAIN_PID" && $MODE == dotfiles* && -n ${LOG_FILE:-} ]]; then
+    printf '\n  Journal complet : %s\n  Rien à moitié appliqué n’est perdu : ./install.sh --dotfiles-restore annule la dernière application.\n' "${LOG_FILE/#$HOME/\~}" >&3
   fi
   # Suppression uniquement du répertoire temporaire créé par mktemp (chemin vérifié).
   if [[ -n $TMP_DIR && $TMP_DIR == "${TMPDIR:-/tmp}"/hypr-installer.* && -d $TMP_DIR ]]; then
@@ -551,7 +568,7 @@ checkpoint_set()  { checkpoint_key >"$STATE_DIR/step-$1.done"; }
 # Une étape réexécutée invalide les étapes suivantes, qui en dépendent.
 checkpoint_clear_from() {
   local i
-  for ((i = $1; i <= 12; i++)); do rm -f -- "$STATE_DIR/step-$i.done"; done
+  for ((i = $1; i <= LAST_STEP; i++)); do rm -f -- "$STATE_DIR/step-$i.done"; done
 }
 state_set() { printf '%s\n' "$2" >"$STATE_DIR/$1"; }
 state_get() { [[ -f $STATE_DIR/$1 ]] && cat "$STATE_DIR/$1" || true; }
@@ -583,7 +600,7 @@ step_verify() {
 }
 
 # Étapes toujours réexécutées (lecture seule ou contrôles).
-readonly ALWAYS_RUN=" 1 2 12 "
+readonly ALWAYS_RUN=" 1 2 13 "
 
 run_step() {
   local idx=$1 fn; shift
@@ -629,7 +646,7 @@ start_sudo_keepalive() {
 # Sinon sudo demanderait le mot de passe pendant que l'indicateur d'activité
 # l'efface de l'écran : invite invisible, puis « sudo: timed out reading password ».
 ensure_sudo() {
-  [[ $MODE == install || $MODE == repair ]] || return 0
+  [[ $MODE == install || $MODE == repair || $MODE == dotfiles ]] || return 0
   sudo -n true 2>/dev/null && return 0
   printf '\n  %sAuthentification administrateur (sudo) requise :%s\n' "$C_YEL" "$C_RST" >&3
   local i
@@ -1258,8 +1275,7 @@ system_upgrade() {   # system_upgrade [paquets à (ré)installer depuis les dép
 }
 
 install_aur_packages() {
-  local entry base commit wants want dir all_installed f
-  local -a files pkglist
+  local entry base commit wants want all_installed
   for entry in "${AUR_PINS[@]}"; do
     IFS='|' read -r base commit wants <<<"$entry"
     all_installed=1
@@ -1269,34 +1285,39 @@ install_aur_packages() {
       [[ $MODE == repair ]] && pkg_has_broken_libs "$want" && all_installed=0
     done
     if ((all_installed)); then log "AUR $base déjà installé"; continue; fi
-    dir="$BUILD_DIR/aur/$base"
-    git_checkout_pinned "https://aur.archlinux.org/$base.git" "$dir" "$commit" "$AUR_GITHUB_MIRROR" "$base"
-    check_aur_dependencies "$dir" "$base" || die "AUR $base : dépendances non résolues (liste ci-dessus) — compilation non lancée."
-    if [[ $base == wlogout ]] && ! gpg --list-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F &>/dev/null; then
-      gpg --keyserver hkps://keys.openpgp.org --recv-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F \
-        || gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F \
-        || warn "Clé PGP de wlogout non récupérée : vérification par somme de contrôle seule."
-    fi
-    # --needed ne sert qu'avec makepkg -i ; les paquets sont installés séparément.
-    install_build_deps "$dir" "$base"
-    local -a mkflags=(--noconfirm -f -c --log)
-    [[ $base == wlogout ]] && ! gpg --list-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F &>/dev/null && mkflags+=(--skippgpcheck)
-    if ! (cd "$dir" && spin "AUR : $base (compilation)" env LC_ALL=C makepkg "${mkflags[@]}"); then
-      # La cause précise (paquet introuvable, conflit, échec de build…) est extraite par spin.
-      LAST_CAUSE=$(explain_failure_output "$SPIN_OUTPUT_FILE" | head -n1)
-      die "AUR $base : makepkg a échoué. ${LAST_CAUSE:-Voir les lignes affichées ci-dessus.}"
-    fi
-    mapfile -t pkglist < <(cd "$dir" && makepkg --packagelist)
-    files=()
-    for want in ${wants//,/ }; do
-      for f in "${pkglist[@]}"; do
-        [[ $(basename "$f") =~ ^${want}-[^-]+-[^-]+-[^-]+\.pkg\.tar(\.[[:alnum:]]+)?$ && -f $f ]] && files+=("$f")
-      done
-    done
-    ((${#files[@]})) || die "AUR $base : paquet(s) $wants introuvable(s) après compilation (PKGDEST ou PKGEXT inattendus ?)."
-    install_pkgfiles "${files[@]}"
+    aur_build_install "$base" "$commit" "$wants"
   done
   return 0
+}
+
+# Compile et installe un paquet AUR à un commit donné (sans makepkg -s, sans
+# sudo en arrière-plan) ; source AUR, ou miroir GitHub officiel en secours.
+aur_build_install() {   # aur_build_install <pkgbase> <commit> <paquets,séparés,par,virgules>
+  local base=$1 commit=$2 wants=$3 dir want f
+  local -a files=() pkglist=()
+  dir="$BUILD_DIR/aur/$base"
+  git_checkout_pinned "https://aur.archlinux.org/$base.git" "$dir" "$commit" "$AUR_GITHUB_MIRROR" "$base"
+  check_aur_dependencies "$dir" "$base" || die "AUR $base : dépendances non résolues (liste ci-dessus) — compilation non lancée."
+  if [[ $base == wlogout ]] && ! gpg --list-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F &>/dev/null; then
+    gpg --keyserver hkps://keys.openpgp.org --recv-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F \
+      || gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F \
+      || warn "Clé PGP de wlogout non récupérée : vérification par somme de contrôle seule."
+  fi
+  install_build_deps "$dir" "$base"
+  local -a mkflags=(--noconfirm -f -c --log)
+  [[ $base == wlogout ]] && ! gpg --list-keys F4FDB18A9937358364B276E9E25D679AF73C6D2F &>/dev/null && mkflags+=(--skippgpcheck)
+  if ! (cd "$dir" && spin "AUR : $base (compilation)" env LC_ALL=C makepkg "${mkflags[@]}"); then
+    LAST_CAUSE=$(explain_failure_output "$SPIN_OUTPUT_FILE" | head -n1)
+    die "AUR $base : makepkg a échoué. ${LAST_CAUSE:-Voir les lignes affichées ci-dessus.}"
+  fi
+  mapfile -t pkglist < <(cd "$dir" && makepkg --packagelist)
+  for want in ${wants//,/ }; do
+    for f in "${pkglist[@]}"; do
+      [[ $(basename "$f") =~ ^${want}-[^-]+-[^-]+-[^-]+\.pkg\.tar(\.[[:alnum:]]+)?$ && -f $f ]] && files+=("$f")
+    done
+  done
+  ((${#files[@]})) || die "AUR $base : paquet(s) $wants introuvable(s) après compilation (PKGDEST ou PKGEXT inattendus ?)."
+  install_pkgfiles "${files[@]}"
 }
 
 # Space Grotesk est le seul élément utile de 38c3-styles. Il est empaqueté dans un
@@ -1702,7 +1723,9 @@ check_aur_dependencies() {
     else
       repo_info=""
       if ! repo_info=$(LC_ALL=C pacman -Si "$pkg" 2>/dev/null); then
-        unresolved+=("$dep")
+        # Dépendance virtuelle (ex. « ttf-font » de brave-bin) : un paquet des
+        # dépôts la fournit-il ? pacman -S choisira ce fournisseur.
+        LC_ALL=C pacman -Sp --print-format %n "$pkg" >/dev/null 2>&1 || unresolved+=("$dep")
       else
         repo_version=$(awk -F': ' '/^Version[[:space:]]*:/ {print $2; exit}' <<<"$repo_info")
         if [[ -n $repo_version ]] && ! dependency_version_satisfied "$dep" "$repo_version"; then
@@ -2316,6 +2339,433 @@ verify_step_11() {
 }
 
 # =============================================================================
+# 15. ÉTAPE 12 — APPLICATIONS, DÉVELOPPEMENT, IA (désactivable : --no-dev)
+# =============================================================================
+# Ajouts à la carte : un échec ici n'abîme jamais le bureau configuré aux étapes
+# précédentes. Les paquets des dépôts et Brave sont obligatoires pour l'étape
+# (échec = étape en échec, reprise possible) ; Claude Code, freebuff et les
+# skills dépendent de services en ligne : un échec devient un avertissement
+# explicite ; l’élément manquant est retenté à chaque relance.
+repo_available() { pacman -Si -- "$1" &>/dev/null; }
+DEV_SOFT_FAIL=0   # un ajout en ligne a échoué PENDANT cette exécution (déjà signalé)
+dev_soft_fail() { DEV_SOFT_FAIL=1; warn "$@"; }
+
+ensure_local_bin_path() {
+  local d="$HOME/.local/bin"
+  mkdir -p "$d"
+  case ":$PATH:" in *":$d:"*) ;; *) PATH="$d:$PATH"; export PATH ;; esac
+  write_managed "$CFG/environment.d/90-hypr-installer-path.conf" <<EOF
+# $MANAGED_MARK — outils installés par l'utilisateur (Claude Code, npm -g)
+PATH=\$HOME/.local/bin:\${PATH}
+EOF
+  mkdir -p "$CFG/fish/conf.d"
+  write_managed "$CFG/fish/conf.d/hypr-installer-path.fish" <<EOF
+# $MANAGED_MARK
+fish_add_path -g \$HOME/.local/bin
+EOF
+  if ! grep -qF '# hypr-installer: ~/.local/bin' "$HOME/.bashrc" 2>/dev/null; then
+    [[ -f $HOME/.bashrc ]] && backup_path "$HOME/.bashrc"
+    printf '\n# hypr-installer: ~/.local/bin\ncase ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac\n' >>"$HOME/.bashrc"
+  fi
+}
+
+install_dev_packages() {
+  local p
+  local -a avail=() unavail=()
+  for p in "${DEV_PKGS[@]}"; do
+    if pkg_installed "$p" || repo_available "$p"; then avail+=("$p"); else unavail+=("$p"); fi
+  done
+  state_set dev.unavailable "${unavail[*]}"
+  ((${#unavail[@]} == 0)) || warn "Absents des dépôts, ignorés : ${unavail[*]}"
+  pac_install "${avail[@]}"
+  ok "Outils de développement : ${avail[*]}"
+}
+
+aur_head() {   # aur_head <pkgbase> : dernier commit AUR (ou miroir GitHub)
+  local base=$1 c=""
+  c=$(git ls-remote "https://aur.archlinux.org/$base.git" HEAD 2>/dev/null | awk 'NR==1{print $1}') || true
+  [[ $c =~ ^[0-9a-f]{40}$ ]] || c=$(git ls-remote "$AUR_GITHUB_MIRROR" "refs/heads/$base" 2>/dev/null | awk 'NR==1{print $1}') || true
+  [[ $c =~ ^[0-9a-f]{40}$ ]] && printf '%s\n' "$c"
+  return 0
+}
+
+install_aur_latest() {
+  local entry base wants want missing commit
+  for entry in "${AUR_LATEST[@]}"; do
+    IFS='|' read -r base wants <<<"$entry"
+    missing=0
+    for want in ${wants//,/ }; do pkg_installed "$want" || missing=1; done
+    if ((!missing)); then log "AUR $base déjà installé (mises à jour : yay -Syu)"; continue; fi
+    commit=$(aur_head "$base")
+    [[ -n $commit ]] || die "AUR $base : dépôt injoignable (aur.archlinux.org et miroir GitHub). Relancez plus tard, ou ./install.sh --no-dev."
+    aur_build_install "$base" "$commit" "$wants"
+    ok "$base installé (version AUR ${commit:0:12})"
+  done
+}
+
+install_npm_globals() {
+  command -v npm >/dev/null || { dev_soft_fail "npm absent : ${NPM_GLOBAL[*]} non installé(s)."; return 0; }
+  local prefix p
+  prefix=$(npm config get prefix 2>/dev/null || true)
+  # npm -g sans sudo : préfixe utilisateur (~/.local), jamais /usr.
+  if [[ $prefix != "$HOME"/* ]]; then
+    npm config set prefix "$HOME/.local" || { warn "npm : préfixe utilisateur non configurable."; return 0; }
+    log "npm prefix : $prefix -> $HOME/.local"
+  fi
+  for p in "${NPM_GLOBAL[@]}"; do
+    if npm ls -g --depth=0 "$p" &>/dev/null; then log "npm $p déjà installé"; continue; fi
+    if spin "npm : $p" npm install -g --no-fund --no-audit "$p"; then ok "$p installé (npm, ~/.local)"
+    else dev_soft_fail "npm : installation de $p impossible (${LAST_CAUSE:-voir journal}). Réessayé à la prochaine relance."; fi
+  done
+}
+
+install_claude_code() {
+  local v
+  if [[ -x $HOME/.local/bin/claude ]] || command -v claude >/dev/null; then
+    log "Claude Code déjà installé (mises à jour automatiques)"
+  elif ! spin "Claude Code (installateur officiel)" bash -c 'set -o pipefail; curl -fsSL "$1" | bash' _ "$CLAUDE_INSTALL_URL"; then
+    dev_soft_fail "Claude Code non installé (${LAST_CAUSE:-voir journal}). Manuel : curl -fsSL $CLAUDE_INSTALL_URL | bash"
+    return 0
+  fi
+  v=$(claude --version 2>/dev/null | head -1 || true)
+  if [[ -n $v ]]; then ok "Claude Code : $v (commande « claude »)"; else warn "Claude Code installé mais « claude --version » ne répond pas."; fi
+}
+
+# Skills officielles (github.com/anthropics/skills) -> ~/.claude/skills/<nom>/.
+# Les skills marquées $SKILL_MARK sont gérées ici ; les vôtres ne sont jamais touchées.
+install_ai_skills() {
+  local dir="$BUILD_DIR/skills" s name dest n=0 kept=0
+  rm -rf -- "${dir:?}.tmp"
+  if [[ ! -d $dir/.git ]] || ! git -C "$dir" cat-file -e "$SKILLS_COMMIT^{commit}" 2>/dev/null; then
+    rm -rf -- "${dir:?}"
+    if ! spin "git clone skills" git clone --quiet "$SKILLS_REPO" "$dir"; then
+      rm -rf -- "${dir:?}"; dev_soft_fail "Skills IA non installées : dépôt $SKILLS_REPO injoignable."; return 0
+    fi
+  fi
+  if ! git -C "$dir" checkout --quiet --force --detach "$SKILLS_COMMIT" 2>/dev/null; then
+    warn "Skills IA : commit $SKILLS_COMMIT introuvable, dernière version utilisée."
+    git -C "$dir" checkout --quiet --force origin/HEAD 2>/dev/null || true
+  fi
+  mkdir -p "$SKILLS_DIR"
+  for s in "$dir"/skills/*/SKILL.md; do
+    name=$(basename "$(dirname "$s")"); dest="$SKILLS_DIR/$name"
+    if [[ -e $dest && ! -f $dest/$SKILL_MARK ]]; then log "Skill personnelle conservée : $dest"; kept=$((kept + 1)); continue; fi
+    sync_tree "$(dirname "$s")/" "$dest/" --delete --exclude "$SKILL_MARK"
+    printf '%s %s\n' "$SKILLS_REPO" "$SKILLS_COMMIT" >"$dest/$SKILL_MARK"
+    n=$((n + 1))
+  done
+  # Skills gérées retirées du dépôt officiel : supprimées (les vôtres restent).
+  for dest in "$SKILLS_DIR"/*/; do
+    dest=${dest%/}
+    [[ -f $dest/$SKILL_MARK && ! -f $dir/skills/$(basename "$dest")/SKILL.md ]] && rm -rf -- "${dest:?}"
+  done
+  ((n)) || { dev_soft_fail "Skills IA : aucune skill trouvée dans $SKILLS_REPO."; return 0; }
+  state_set skills.count "$n"
+  ok "Skills IA : $n installée(s) dans ~/.claude/skills$( ((kept)) && echo " ($kept skill(s) personnelle(s) conservée(s))")"
+}
+
+configure_docker() {
+  pkg_installed docker || return 0
+  if ! systemctl is-enabled --quiet docker.socket 2>/dev/null; then
+    spin "Activation de docker.socket" sudo systemctl enable --now docker.socket || warn "docker.socket non activé (${LAST_CAUSE:-voir journal})."
+  fi
+  if ! id -nG "$USER" | tr ' ' '\n' | grep -qx docker; then
+    if ask_yes_no "Autoriser $USER à utiliser Docker sans sudo (groupe docker, équivalent à un accès administrateur) ?"; then
+      sudo gpasswd -a "$USER" docker >/dev/null && info "Groupe docker ajouté (effectif à la prochaine connexion)"
+    else
+      info "Docker utilisable avec sudo (groupe docker non ajouté)"
+    fi
+  fi
+}
+
+install_apps_and_dev() {
+  if ((NO_DEV)); then info "Étape ignorée (--no-dev)"; state_set dev.skipped 1; return 0; fi
+  rm -f -- "$STATE_DIR/dev.skipped"
+  ensure_local_bin_path
+  install_dev_packages
+  install_aur_latest
+  configure_docker
+  install_npm_globals
+  install_claude_code
+  install_ai_skills
+}
+
+verify_step_12() {
+  ((NO_DEV)) && return 0
+  [[ $MODE == diagnose && -f $STATE_DIR/dev.skipped ]] && return 0
+  local p unavail
+  unavail=" $(state_get dev.unavailable) "
+  for p in "${DEV_PKGS[@]}"; do
+    [[ $unavail == *" $p "* ]] && continue
+    pkg_installed "$p" || vp_pkg "$p"
+  done
+  local entry base wants want
+  for entry in "${AUR_LATEST[@]}"; do
+    IFS='|' read -r base wants <<<"$entry"
+    for want in ${wants//,/ }; do pkg_installed "$want" || vp_pkg "$want"; done
+  done
+  [[ -f $CFG/environment.d/90-hypr-installer-path.conf ]] || vp "PATH ~/.local/bin non configuré"
+  # Ajouts en ligne : absents -> l'étape est rejouée à la prochaine exécution ;
+  # un échec déjà signalé pendant CETTE exécution n'invalide pas l'étape.
+  if ((!DEV_SOFT_FAIL)); then
+    [[ -x $HOME/.local/bin/claude ]] || command -v claude >/dev/null || vp "Claude Code absent"
+    for p in "${NPM_GLOBAL[@]}"; do [[ -e $HOME/.local/bin/$p ]] || command -v "$p" >/dev/null || vp "$p (npm) absent"; done
+    compgen -G "$SKILLS_DIR/*/$SKILL_MARK" >/dev/null || vp "skills IA absentes (~/.claude/skills)"
+  fi
+  return 0
+}
+
+# =============================================================================
+# 15 bis. MODE --dotfiles <lien> / --dotfiles-restore
+# =============================================================================
+# Remplace l'apparence (Hyprland, barre, terminal, lanceur…) par celle d'un dépôt
+# de dotfiles. Garanties :
+#  - tout élément remplacé est d'abord DÉPLACÉ dans une sauvegarde (manifeste) :
+#    --dotfiles-restore remet exactement l'état précédent ;
+#  - aucun script du dépôt n'est exécuté (install.sh, setup.sh… sont signalés) ;
+#  - seuls ~/.config, ~/.local/share, ~/.local/bin et les fichiers cachés du
+#    dossier personnel sont concernés (jamais .ssh, .gnupg, ni hors de $HOME) ;
+#  - aucun paquet de noyau, de chargeur de démarrage ou de partitionnement
+#    n'est installé, même s'il figure dans une liste du dépôt ;
+#  - une configuration Hyprland refusée par Hyprland --verify-config est
+#    annulée aussitôt (pas de boucle de connexion) ;
+#  - le clavier AZERTY est ré-appliqué par-dessus la nouvelle configuration.
+readonly DOTFILES_DIR="$DATA_DIR/dotfiles"
+readonly DOTFILES_BACKUPS="$DATA_DIR/dotfiles-backups"
+readonly AZERTY_LUA_NAME="hypr-installer-azerty.lua"
+readonly AZERTY_LUA_HOOK='pcall(dofile, (os.getenv("HOME") or "") .. "/.config/hypr/hypr-installer-azerty.lua") -- hypr-installer : AZERTY'
+# Dossier de configuration -> paquet des dépôts qui l'utilise.
+declare -grA DF_PKG_MAP=(
+  [waybar]=waybar [rofi]=rofi [wofi]=wofi [fuzzel]=fuzzel [tofi]=tofi [walker]=walker
+  [dunst]=dunst [mako]=mako [swaync]=swaync [eww]=eww
+  [kitty]=kitty [alacritty]=alacritty [foot]=foot [wezterm]=wezterm [ghostty]=ghostty
+  [fastfetch]=fastfetch [hyprpaper]=hyprpaper [swww]=swww [waypaper]=waypaper
+  [hyprlock]=hyprlock [hypridle]=hypridle [swaylock]=swaylock [wlogout]=wlogout
+  [cava]=cava [btop]=btop [htop]=htop [nwg-look]=nwg-look [nwg-dock-hyprland]=nwg-dock-hyprland
+  [starship.toml]=starship [fish]=fish [nvim]=neovim [yazi]=yazi [ranger]=ranger [lf]=lf
+  [zathura]=zathura [mpv]=mpv [imv]=imv [Thunar]=thunar [qt5ct]=qt5ct [qt6ct]=qt6ct
+  [kvantum]=kvantum [Kvantum]=kvantum [wal]=python-pywal [matugen]=matugen
+  [.zshrc]=zsh [.tmux.conf]=tmux [tmux]=tmux
+)
+# Jamais installés depuis un dépôt de dotfiles (démarrage, noyau, disques, pilotes).
+readonly DF_PKG_DENY='^(grub.*|efibootmgr|os-prober|refind.*|limine.*|syslinux|shim.*|sbctl|systemd-boot.*|mkinitcpio.*|dracut.*|booster|kernel-install.*|linux|linux-.*|.*-dkms|nvidia.*|parted|gparted|gptfdisk|fdisk|util-linux|e2fsprogs|btrfs-progs|dosfstools|ntfs-3g|cryptsetup|lvm2|mdadm|pacman|pacman-.*|archlinux-keyring|endeavouros-keyring|base|filesystem|glibc|systemd)$'
+DF_SRC=() DF_DST=() DF_PKGS=() DF_LIST_PKGS=() DF_SCRIPTS=()
+
+df_add() {   # df_add <source> <destination>
+  local i
+  [[ -e $1 || -L $1 ]] || return 0
+  [[ $2 == "$HOME"/?* && $2 != "$DATA_DIR"* ]] || return 0
+  for i in "${!DF_DST[@]}"; do [[ ${DF_DST[i]} == "$2" ]] && { DF_SRC[i]=$1; return 0; }; done
+  DF_SRC+=("$1"); DF_DST+=("$2")
+}
+
+df_add_home_root() {   # dossier reproduisant $HOME (.config, .local, fichiers cachés)
+  local root=$1 e n
+  for e in "$root"/.config/* "$root"/.config/.[!.]*; do df_add "$e" "$CFG/$(basename "$e")"; done
+  for e in "$root"/.local/share/*; do
+    n=$(basename "$e"); [[ $n == hypr-installer ]] && continue
+    df_add "$e" "${XDG_DATA_HOME:-$HOME/.local/share}/$n"
+  done
+  for e in "$root"/.local/bin/*; do df_add "$e" "$HOME/.local/bin/$(basename "$e")"; done
+  for e in "$root"/.[!.]*; do
+    n=$(basename "$e")
+    case $n in .config|.local|.git|.github|.gitignore|.gitmodules|.gitattributes|.ssh|.gnupg|.claude|.cache|.DS_Store|.stow-local-ignore|.editorconfig|.vscode|.idea|.pre-commit-config.yaml|.prettierrc*|.luarc.json|.stylua.toml|.envrc) continue ;; esac
+    df_add "$e" "$HOME/$n"
+  done
+}
+
+df_add_config_root() {   # dossier reproduisant ~/.config (sous-dossiers seulement)
+  local e n
+  for e in "$1"/*/ "$1"/starship.toml; do
+    e=${e%/}; n=$(basename "$e")
+    case ${n,,} in screenshots|screenshot|assets|images|img|preview|previews|docs|doc|wallpapers|walls|scripts|install|setup|.github) continue ;; esac
+    df_add "$e" "$CFG/$n"
+  done
+}
+
+dotfiles_plan() {   # remplit DF_SRC/DF_DST selon l'organisation du dépôt
+  local drepo=$1 r d n known=0
+  DF_SRC=(); DF_DST=()
+  for r in "$drepo" "$drepo/dots" "$drepo/home" "$drepo/dotfiles" "$drepo/files"; do
+    [[ -d $r/.config ]] && df_add_home_root "$r"
+  done
+  if ((${#DF_DST[@]} == 0)); then   # GNU Stow : un dossier par programme contenant .config/…
+    for d in "$drepo"/*/; do [[ -d $d/.config || -f $d/.zshrc || -f $d/.bashrc ]] && df_add_home_root "${d%/}"; done
+  fi
+  if ((${#DF_DST[@]} == 0)) && [[ -d $drepo/config ]]; then df_add_config_root "$drepo/config"; fi
+  if ((${#DF_DST[@]} == 0)); then   # le dépôt EST un ~/.config
+    for d in "$drepo"/*/; do n=$(basename "$d"); [[ -n ${DF_PKG_MAP[$n]:-} || $n == hypr ]] && known=1; done
+    ((known)) && df_add_config_root "$drepo"
+  fi
+  ((${#DF_DST[@]})) || die "Organisation du dépôt non reconnue : ni .config/, ni dots/.config, ni home/, ni paquets stow, ni dossiers de configuration (hypr, waybar, kitty…) à la racine."
+  # Scripts du dépôt : signalés, jamais exécutés.
+  mapfile -t DF_SCRIPTS < <(find "$drepo" -maxdepth 2 -type f \( -iname 'install*' -o -iname 'setup*' -o -iname 'bootstrap*' \) -not -path '*/.git/*' -printf '%P\n' | sort | head -n 10)
+}
+
+dotfiles_packages() {   # paquets à installer : connus d'après les dossiers + listes du dépôt
+  local drepo=$1 d n p f
+  local -a cand=() list=()
+  DF_PKGS=(); DF_LIST_PKGS=()
+  for d in "${DF_DST[@]}"; do n=$(basename "$d"); [[ -n ${DF_PKG_MAP[$n]:-} ]] && cand+=("${DF_PKG_MAP[$n]}"); done
+  for f in packages.txt pkglist.txt packages.lst pkglist packages pacman.txt pkgs.txt; do
+    [[ -f $drepo/$f ]] || continue
+    mapfile -t -O "${#list[@]}" list < <(sed -e 's/#.*//' "$drepo/$f" | awk '{print $1}' | grep -E '^[a-z0-9@._+-]+$' || true)
+  done
+  for p in "${cand[@]}"; do
+    [[ $p =~ $DF_PKG_DENY ]] && continue
+    pkg_installed "$p" || ! repo_available "$p" || DF_PKGS+=("$p")
+  done
+  local -a denied=() aur=()
+  for p in "${list[@]}"; do
+    if [[ $p =~ $DF_PKG_DENY ]]; then denied+=("$p"); continue; fi
+    pkg_installed "$p" && continue
+    if repo_available "$p"; then DF_LIST_PKGS+=("$p"); else aur+=("$p"); fi
+  done
+  mapfile -t DF_PKGS < <(printf '%s\n' "${DF_PKGS[@]}" | sort -u | sed '/^$/d')
+  mapfile -t DF_LIST_PKGS < <(printf '%s\n' "${DF_LIST_PKGS[@]}" | sort -u | sed '/^$/d')
+  ((${#denied[@]})) && info "Paquets système de la liste ignorés (démarrage/noyau/disques) : $(printf '%s\n' "${denied[@]}" | sort -u | xargs)"
+  ((${#aur[@]})) && info "Paquets de la liste absents des dépôts (AUR ?), non installés : $(printf '%s\n' "${aur[@]}" | sort -u | head -n 15 | xargs)$( ((${#aur[@]} > 15)) && echo ' …')"
+  return 0
+}
+
+hypr_config_ok() {   # hypr_config_ok <hyprland.lua>
+  command -v Hyprland >/dev/null || return 0
+  local out; out=$(Hyprland --verify-config -c "$1" 2>&1 || true)
+  log "verify-config ($1) : $out"
+  grep -qi 'config ok' <<<"$out"
+}
+
+dotfiles_azerty() {   # ré-applique l'AZERTY par-dessus la configuration Hyprland installée
+  local main="$CFG/hypr/hyprland.lua" binds=1
+  [[ -f $main ]] || return 0
+  grep -rqsE 'code:1[0-9]\b' "$CFG/hypr" && binds=0
+  {
+    printf -- '-- %s — clavier AZERTY par-dessus vos dotfiles (supprimez la ligne\n' "$MANAGED_MARK"
+    printf -- '-- « hypr-installer : AZERTY » de hyprland.lua pour le désactiver)\n'
+    printf 'hl.config({ input = { kb_layout = "fr" } })\n'
+    if ((binds)); then
+      cat <<'EOF'
+-- Bureaux 1-10 par touches physiques (& é " ' ( - è _ ç à) : les chiffres
+-- demandent Maj en AZERTY, les raccourcis « SUPER + 1 » ne marchent donc pas.
+for i = 1, 10 do
+    hl.bind("SUPER + code:" .. (9 + i), function() hl.dispatch(hl.dsp.focus({ workspace = i })) end)
+    hl.bind("SUPER + SHIFT + code:" .. (9 + i), function() hl.dispatch(hl.dsp.window.move({ workspace = i })) end)
+end
+EOF
+    fi
+  } >"$CFG/hypr/$AZERTY_LUA_NAME"
+  grep -qF "$AZERTY_LUA_HOOK" "$main" || printf '\n%s\n' "$AZERTY_LUA_HOOK" >>"$main"
+  log "AZERTY ré-appliqué (raccourcis bureaux : $binds)"
+}
+
+apply_dotfiles() {
+  local url=${DOTFILES_URL%%#*} ref="" name drepo commit i n dst bk hyi=-1
+  [[ $DOTFILES_URL == *#* ]] && ref=${DOTFILES_URL#*#}
+  if [[ ! $url =~ ^(https?://|git@|ssh://|file://) && ! -d $url ]]; then
+    die "Lien invalide : $url (attendu : https://github.com/utilisateur/depot, éventuellement suivi de #branche)."
+  fi
+  command -v git >/dev/null || die "git est requis."
+  name=$(basename "${url%/}" .git); name=${name//[^A-Za-z0-9._-]/_}
+  drepo="$DOTFILES_DIR/$name"
+  rm -rf -- "${drepo:?}"; mkdir -p "$DOTFILES_DIR"
+  spin "Téléchargement des dotfiles ($name)" git clone --quiet --recurse-submodules "$url" "$drepo" \
+    || die "Téléchargement impossible : $url (${LAST_CAUSE:-dépôt privé, lien erroné ou réseau}). "
+  if [[ -n $ref ]]; then
+    git -C "$drepo" checkout --quiet --force "$ref" 2>/dev/null || die "Branche, tag ou commit introuvable : $ref"
+    git -C "$drepo" submodule update --init --recursive --quiet 2>/dev/null || true
+  fi
+  commit=$(git -C "$drepo" rev-parse HEAD)
+  dotfiles_plan "$drepo"
+
+  # Hyprland ≥ 0.55 ne lit plus que hyprland.lua : une configuration hyprland.conf
+  # seule donnerait un bureau sans réglages (ou une boucle de connexion).
+  for i in "${!DF_DST[@]}"; do [[ ${DF_DST[i]} == "$CFG/hypr" ]] && hyi=$i; done
+  if ((hyi >= 0)) && [[ ! -f ${DF_SRC[hyi]}/hyprland.lua ]]; then
+    warn "Ces dotfiles fournissent hyprland.conf (ancien format) : Hyprland ≥ 0.55 n’accepte que hyprland.lua. Votre configuration Hyprland actuelle est conservée ; le reste (barre, terminal, lanceur…) est appliqué."
+    unset 'DF_SRC[hyi]' 'DF_DST[hyi]'; DF_SRC=("${DF_SRC[@]}"); DF_DST=("${DF_DST[@]}"); hyi=-1
+    ((${#DF_DST[@]})) || die "Rien d’applicable dans ce dépôt (seulement une configuration Hyprland incompatible)."
+  fi
+  dotfiles_packages "$drepo"
+
+  ui ""; ui "  ${C_B}Dotfiles : $url${ref:+ ($ref)}${C_RST} ${C_DIM}commit ${commit:0:12}${C_RST}"
+  ui "  Éléments remplacés (${#DF_DST[@]}) — l’existant est sauvegardé :"
+  for dst in "${DF_DST[@]}"; do ui "    • ${dst/#$HOME/\~}"; done
+  ((${#DF_PKGS[@]})) && ui "  Paquets nécessaires (dépôts officiels) : ${DF_PKGS[*]}"
+  ((${#DF_SCRIPTS[@]})) && ui "  ${C_DIM}Scripts du dépôt NON exécutés : ${DF_SCRIPTS[*]}${C_RST}"
+  ask_yes_no "Appliquer ces dotfiles ? (annulable avec ./install.sh --dotfiles-restore)" || { ui "  Annulé, rien n’a été modifié."; return 0; }
+
+  if ((${#DF_PKGS[@]} + ${#DF_LIST_PKGS[@]})); then
+    ensure_sudo
+    ((${#DF_PKGS[@]})) && pac_install "${DF_PKGS[@]}"
+    if ((${#DF_LIST_PKGS[@]})) && ask_yes_no "Installer aussi les ${#DF_LIST_PKGS[@]} paquet(s) listé(s) par le dépôt (${DF_LIST_PKGS[*]:0:10}$( ((${#DF_LIST_PKGS[@]} > 10)) && echo ' …')) ?"; then
+      pac_install "${DF_LIST_PKGS[@]}"
+    fi
+  fi
+
+  mkdir -p "$DOTFILES_BACKUPS"
+  bk=$(mktemp -d "$DOTFILES_BACKUPS/$RUN_TS.XXXX")
+  mkdir -p "$bk/items"
+  printf '%s\t%s\n' "$url${ref:+#$ref}" "$commit" >"$bk/SOURCE"
+  : >"$bk/MANIFEST.tsv"
+  printf '%s\n' "$bk" >>"$DOTFILES_BACKUPS/stack"
+  n=0
+  for i in "${!DF_DST[@]}"; do
+    dst=${DF_DST[i]}
+    if [[ -e $dst || -L $dst ]]; then
+      mv -- "$dst" "$bk/items/$i"
+      printf '%s\t%s\n' "$dst" "$bk/items/$i" >>"$bk/MANIFEST.tsv"
+    else
+      printf '%s\t-\n' "$dst" >>"$bk/MANIFEST.tsv"
+    fi
+    mkdir -p -- "$(dirname "$dst")"
+    cp -a -- "${DF_SRC[i]}" "$dst" || die "Copie impossible : ${DF_SRC[i]} -> $dst (sauvegarde : $bk)"
+    [[ -e $dst/.git ]] && rm -rf -- "${dst:?}/.git"
+    n=$((n + 1))
+  done
+  if ((hyi >= 0)) && [[ -f $CFG/hypr/hyprland.lua ]]; then
+    dotfiles_azerty
+    if ! hypr_config_ok "$CFG/hypr/hyprland.lua"; then
+      warn "La configuration Hyprland de ces dotfiles est refusée par Hyprland --verify-config : l’ancienne est remise (pas de boucle de connexion). Le reste est appliqué."
+      rm -rf -- "${CFG:?}/hypr"
+      [[ -e $bk/items/$hyi ]] && mv -- "$bk/items/$hyi" "$CFG/hypr"
+      sed -i "\#^$CFG/hypr\t#d" "$bk/MANIFEST.tsv"
+    fi
+  fi
+  state_set dotfiles.active "$url${ref:+#$ref} ${commit:0:12}"
+  ok "$n élément(s) appliqué(s) depuis $name. Sauvegarde : ${bk/#$HOME/\~}"
+  ui "  Déconnectez-vous puis reconnectez-vous pour voir le nouveau bureau."
+  ui "  Revenir en arrière : ./install.sh --dotfiles-restore   ·   Revenir à end-4 : ./install.sh --repair"
+}
+
+restore_dotfiles() {
+  local bk dst b src
+  local -a lines=() stack=()
+  [[ -s $DOTFILES_BACKUPS/stack ]] || die "Aucune application de dotfiles à annuler."
+  mapfile -t stack <"$DOTFILES_BACKUPS/stack"
+  bk=${stack[-1]}
+  [[ -f $bk/MANIFEST.tsv ]] || die "Sauvegarde introuvable ou incomplète : $bk"
+  src=$(cut -f1 "$bk/SOURCE" 2>/dev/null || echo '?')
+  mapfile -t lines < <(tac "$bk/MANIFEST.tsv")
+  ui ""; ui "  ${C_B}Annulation des dotfiles $src${C_RST} (${#lines[@]} élément(s), état du $(basename "$bk"))"
+  ask_yes_no "Remettre la configuration d’avant ?" || { ui "  Annulé."; return 0; }
+  for b in "${lines[@]}"; do
+    dst=${b%%$'\t'*}; b=${b#*$'\t'}
+    [[ $dst == "$HOME"/?* ]] || { warn "Entrée ignorée (hors du dossier personnel) : $dst"; continue; }
+    rm -rf -- "$dst"
+    if [[ $b != - ]]; then
+      [[ -e $b || -L $b ]] || { warn "Sauvegarde manquante pour $dst"; continue; }
+      mkdir -p -- "$(dirname "$dst")"; mv -- "$b" "$dst"
+    fi
+  done
+  unset 'stack[-1]'
+  printf '%s\n' "${stack[@]}" | sed '/^$/d' >"$DOTFILES_BACKUPS/stack"
+  mv -- "$bk" "$(mktemp -u "$bk.restored.XXXX")"
+  if ((${#stack[@]})); then state_set dotfiles.active "$(cut -f1 "${stack[-1]}/SOURCE" 2>/dev/null)"; else rm -f -- "$STATE_DIR/dotfiles.active"; fi
+  ok "Configuration précédente restaurée (${#lines[@]} élément(s)). Les paquets installés sont conservés."
+  ui "  Déconnectez-vous puis reconnectez-vous pour appliquer."
+}
+
+# =============================================================================
 # 15 ter. MODE --diagnose (aucune modification du système)
 # =============================================================================
 diagnose_prereqs() {
@@ -2391,7 +2841,7 @@ diagnose_steps() {
     chk FAIL "États des étapes" "pacman absent : état des paquets impossible à vérifier"
     return 0
   fi
-  for i in 3 4 5 6 7 8 9 10 11; do
+  for i in 3 4 5 6 7 8 9 10 11 12; do
     label="Étape $(printf '%02d' "$i") — ${STEP_TITLES[i]}"
     if step_verify "$i"; then
       STEP_STATUS[i]=DONE
@@ -2422,7 +2872,7 @@ diagnose_steps() {
   ui ""
   if ((CHECK_FAIL)); then
     ui "  Action conseillée : ${C_B}./install.sh${C_RST} (reprise automatique) ; si une étape terminée est dégradée : ${C_B}./install.sh --repair${C_RST}"
-  elif [[ " ${STEP_STATUS[*]:3:9} " == *" NOTRUN "* ]]; then
+  elif [[ " ${STEP_STATUS[*]:3:10} " == *" NOTRUN "* ]]; then
     ui "  Installation non terminée : lancez ${C_B}./install.sh${C_RST} pour continuer."
   else
     ui "  Toutes les étapes sont terminées et conformes. Tests en session : ./install.sh --post-login-check"
@@ -2492,6 +2942,16 @@ validate_installation() {
   chk_if "Bureaux 1-10 par touches physiques" 'grep -q "\"SUPER + code:\" .. numberkey" "$CFG/hypr/hyprland/keybinds.lua"' "Super+& é \" ' ( - è _ ç à"
   chk_if "Gestionnaire de connexion" '[[ -n $CURRENT_DM ]] && systemctl is-enabled --quiet "$CURRENT_DM.service"' "${CURRENT_DM:-aucun}"
   chk_if "Autostart configuré" 'grep -q -- "--first-login" "$HYPR_CUSTOM/execs.lua" && [[ -x $BIN_DIR/install.sh ]]' "hyprland.start (end-4 + premier démarrage)"
+  if ((NO_DEV)) || [[ -f $STATE_DIR/dev.skipped ]]; then
+    chk INFO "Applications et outils de développement" "non installés (--no-dev)"
+  else
+    chk_if "Brave" 'command -v brave >/dev/null' "brave-bin (AUR, mises à jour : yay -Syu)"
+    chk_if "Node.js, Python, git" 'command -v node >/dev/null && command -v python3 >/dev/null && command -v git >/dev/null' "$(node --version 2>/dev/null || echo '?') / $(python3 --version 2>/dev/null | cut -d' ' -f2)"
+    chk_if "Claude Code" '[[ -x $HOME/.local/bin/claude ]] || command -v claude >/dev/null' "commande « claude »" WARN "absent : curl -fsSL $CLAUDE_INSTALL_URL | bash"
+    chk_if "freebuff" 'PATH="$HOME/.local/bin:$PATH" command -v freebuff >/dev/null' "npm (~/.local)" WARN "absent : npm install -g freebuff"
+    local nsk; nsk=$(find "$SKILLS_DIR" -mindepth 2 -maxdepth 2 -name "$SKILL_MARK" 2>/dev/null | wc -l)
+    chk_if "Skills IA (~/.claude/skills)" '((nsk > 0))' "$nsk skill(s) officielle(s)" WARN "aucune"
+  fi
   local dup=""; for c in dunst mako swaync hyprpolkitagent; do pkg_installed "$c" && dup+="$c "; done
   systemctl --user is-enabled hypridle.service &>/dev/null && dup+="hypridle.service "
   chk_if "Aucun conflit de démarrage" '[[ -z $dup ]]' "instance unique de chaque composant" WARN "à vérifier : $dup"
@@ -2507,8 +2967,8 @@ write_report() {
   {
     printf 'HYPRLAND AUTOMATED INSTALLER %s — %s\n' "$INSTALLER_VERSION" "$title"
     printf 'Date : %s   Mode : %s   Utilisateur : %s\n\n' "$(date '+%F %T')" "$MODE" "$USER"
-    printf 'Étapes :\n'; local i; for i in $(seq 1 12); do printf '  [%02d/12] %-27s %s\n' "$i" "${STEP_TITLES[i]}" "${STEP_STATUS[i]}"; done
-    for i in $(seq 1 12); do
+    printf 'Étapes :\n'; local i; for i in $(seq 1 "$LAST_STEP"); do printf '  [%02d/%s] %-27s %s\n' "$i" "$LAST_STEP" "${STEP_TITLES[i]}" "${STEP_STATUS[i]}"; done
+    for i in $(seq 1 "$LAST_STEP"); do
       [[ -f $STATE_DIR/step-$i.failed ]] || continue
       printf '\nDernier échec enregistré, étape %02d :\n' "$i"; sed 's/^/  /' "$STATE_DIR/step-$i.failed"
     done
@@ -2791,6 +3251,11 @@ Usage : ./install.sh [options]
   --allow-non-eos      Autoriser une base Arch autre qu’EndeavourOS
   --allow-other-gpu    Autoriser l’absence de GPU AMD
   --no-reboot-prompt   Ne pas proposer le redémarrage à la fin
+  --no-dev             Ne pas installer Brave, les outils de développement et d’IA (étape 12)
+  --dotfiles <lien>    Remplace l’apparence par les dotfiles d’un dépôt git (GitHub…) :
+                       sauvegarde, copie, dépendances connues, AZERTY conservé.
+                       Ex. : ./install.sh --dotfiles https://github.com/user/dots#branche
+  --dotfiles-restore   Annule le dernier --dotfiles (restaure la configuration précédente)
   -h, --help           Cette aide     --version   Version
 
 Journaux, sauvegardes, rapports : ~/.local/share/hypr-installer/
@@ -2810,6 +3275,9 @@ parse_args() {
       --allow-non-eos) ALLOW_NON_EOS=1 ;;
       --allow-other-gpu) ALLOW_OTHER_GPU=1 ;;
       --no-reboot-prompt) NO_REBOOT_PROMPT=1 ;;
+      --no-dev) NO_DEV=1 ;;
+      --dotfiles) MODE=dotfiles; shift; DOTFILES_URL=${1:-}; [[ -n $DOTFILES_URL ]] || { echo "--dotfiles : lien du dépôt manquant" >&2; exit 2; } ;;
+      --dotfiles-restore) MODE=dotfiles-restore ;;
       -h|--help) usage; exit 0 ;;
       --version) printf '%s\n' "$INSTALLER_VERSION"; exit 0 ;;
       *) printf 'Option inconnue : %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
@@ -2836,6 +3304,13 @@ main() {
     session_debug
     exit 0
   fi
+  if [[ $MODE == dotfiles || $MODE == dotfiles-restore ]]; then
+    LOG_FILE="$LOG_DIR/$MODE-$RUN_TS.log"
+    exec 3>&1 4>&2 5>>"$LOG_FILE"; exec >>"$LOG_FILE" 2>&1
+    log "hypr-installer $INSTALLER_VERSION — mode $MODE ${DOTFILES_URL}"
+    if [[ $MODE == dotfiles ]]; then apply_dotfiles; else restore_dotfiles; fi
+    exit 0
+  fi
   if [[ $MODE == post-login-check ]]; then
     LOG_FILE="$LOG_DIR/post-login-$RUN_TS.log"
     exec 3>&1 4>&2 5>>"$LOG_FILE"; exec >>"$LOG_FILE" 2>&1
@@ -2854,10 +3329,19 @@ main() {
     # Aucune installation ni modification du système : seulement des constats.
     run_step 1 diagnose_prereqs
     run_step 2 diagnose_hardware
-    run_step 12 diagnose_steps generate_report
+    run_step 13 diagnose_steps generate_report
     exit $((CHECK_FAIL > 0))
   fi
 
+  local active; active=$(state_get dotfiles.active)
+  if [[ -n $active ]]; then
+    ui "  ${C_YEL}Des dotfiles sont appliqués : $active${C_RST}"
+    ui "  Continuer réinstalle la configuration end-4 (Hyprland, Quickshell…) par-dessus."
+    ui "  Pour seulement annuler les dotfiles : ./install.sh --dotfiles-restore"
+    ask_yes_no "Réinstaller la configuration end-4 ?" || { ui "  Rien n’a été modifié."; FAILURE_HANDLED=1; exit 0; }
+    rm -f -- "$STATE_DIR/dotfiles.active"
+    checkpoint_clear_from 6
+  fi
   run_step 1 preflight resolve_versions confirm_plan cleanup_previous_runs
   run_step 2 detect_hardware
   run_step 3 install_system_packages
@@ -2869,7 +3353,8 @@ main() {
   run_step 9 configure_keybindings
   run_step 10 configure_desktop
   run_step 11 configure_all_services
-  run_step 12 validate_installation generate_report
+  run_step 12 install_apps_and_dev
+  run_step 13 validate_installation generate_report
 
   ui ""
   if ((CHECK_FAIL)); then

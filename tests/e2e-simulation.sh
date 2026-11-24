@@ -239,6 +239,11 @@ if [[ $1 == clone ]]; then
       n=$(basename "$url" .git); v=$(<"$MOCK/pinver.$n")
       printf "pkgname=%s\npkgver=%s\npkgrel=%s\narch=(x86_64)\n" "$n" "${v%-*}" "${v##*-}" >"$dir/PKGBUILD" ;;
     *google-sans-flex*) echo font >"$dir/GoogleSansFlex.ttf" ;;
+    *anthropics/skills*)
+      for k in pdf docx skill-creator; do mkdir -p "$dir/skills/$k"; printf -- "---\nname: %s\n---\n" "$k" >"$dir/skills/$k/SKILL.md"; done
+      mkdir -p "$dir/template"; echo x >"$dir/template/SKILL.md" ;;
+    *)
+      if [[ -d $url ]]; then (cd "$url" && tar --exclude=./.git -cf - .) | (cd "$dir" && tar -xf -); fi ;;
   esac
   # Contenu suivi par « git » : restauré par checkout --force / clean -fdx.
   mkdir -p "$dir/.git/orig"; (cd "$dir" && tar --exclude=./.git -cf "$dir/.git/orig.tar" .)
@@ -249,7 +254,7 @@ case $1 in
   rev-parse)
     case $2 in
       --git-dir) [[ -d $dir/.git ]] ;;
-      HEAD) if [[ $dir == */shapes ]]; then echo "$E2E_SHAPES_COMMIT"; else cat "$dir/.git/MOCK_HEAD"; fi ;;
+      HEAD) if [[ $dir == */shapes ]]; then echo "$E2E_SHAPES_COMMIT"; else cat "$dir/.git/MOCK_HEAD" 2>/dev/null || echo 0123456789abcdef0123456789abcdef01234567; fi ;;
       *) echo "$E2E_END4_COMMIT" ;;
     esac ;;
   checkout) for a in "$@"; do c=$a; done; echo "$c" >"$dir/.git/MOCK_HEAD"
@@ -270,6 +275,8 @@ code=200
 [[ $url == https://archive.archlinux.org && $head == 1 ]] && code=403
 [[ $url == https://archive.archlinux.org && -f $MOCK/archive-root-403 ]] && code=403
 [[ -n $out && $out != /dev/null ]] && echo data >"$out"
+# Installateur officiel de Claude Code : script envoyé sur la sortie standard.
+[[ $url == https://claude.ai/install.sh && -z $out ]] && cat "$MOCK/claude-install.sh"
 [[ -n $w ]] && printf "%s" "$code"
 exit 0'
 
@@ -281,7 +288,7 @@ mock vercmp '[[ $1 == "$2" ]] && { echo 0; exit; }; [[ $(printf "%s\n%s\n" "$1" 
 mock Hyprland '
 case " $* " in
   *" --version "*) [[ -f $MOCK/db/hyprland ]] || exit 1; v=$(cat "$MOCK/db/hyprland"); echo "Hyprland ${v%-*} built from branch"; ;;
-  *" --verify-config "*) echo "config ok" ;;
+  *" --verify-config "*) if [[ -f $MOCK/verify-fail ]]; then echo "error: hyprland.lua:3: attempt to call a nil value"; else echo "config ok"; fi ;;
 esac'
 mock quickshell 'exit 0'; mock qs 'exit 0'
 mock lspci 'printf "%s\n" "06:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Lexa PRO [Radeon 540/540X/550/550X / RX 540X/550/550X] [1002:699f] (rev c7)" "	Kernel driver in use: amdgpu"'
@@ -325,6 +332,23 @@ for c in pacman-key gpg fc-cache xdg-user-dirs-update kwriteconfig6 groupadd use
   mock "$c" "$LOGCALL"'; exit 0'
 done
 mock getent 'exit 2'
+cat >"$MOCK/claude-install.sh" <<'EOS'
+mkdir -p "$HOME/.local/bin"
+printf '#!/bin/sh\necho "2.1.0 (Claude Code)"\n' >"$HOME/.local/bin/claude"
+chmod +x "$HOME/.local/bin/claude"
+EOS
+mock npm "$LOGCALL"'
+pf=$MOCK/npm-prefix
+case "$1 $2" in
+  "config get") cat "$pf" 2>/dev/null || echo /usr ;;
+  "config set") echo "$4" >"$pf" ;;
+  "ls -g") for a; do p=$a; done; [[ -f $MOCK/npm-$p ]] ;;
+  "install -g")
+    [[ -f $MOCK/npm-fail ]] && { echo "npm error code E404"; exit 1; }
+    for a; do p=$a; done; [[ $(cat "$pf" 2>/dev/null) == /usr ]] && { echo "npm error EACCES"; exit 243; }
+    : >"$MOCK/npm-$p"; d=$(cat "$pf")/bin; mkdir -p "$d"; printf "#!/bin/sh\nexit 0\n" >"$d/$p"; chmod +x "$d/$p" ;;
+esac'
+for c in node brave gpasswd; do mock "$c" "$LOGCALL"'; echo v22.0.0'; done
 # Commandes interdites (dual boot) : tout appel est consigné et fait échouer le test.
 for c in parted fdisk cfdisk sfdisk mkfs mkfs.ext4 mkfs.fat mkfs.btrfs wipefs sgdisk gdisk grub-install grub-mkconfig \
          efibootmgr bootctl os-prober mount umount mkinitcpio dracut; do
@@ -335,7 +359,7 @@ done
 fresh_db() {
   rm -rf -- "$MOCK/db"; mkdir -p "$MOCK/db"
   for p in base linux pacman sudo git curl networkmanager firefox endeavouros-keyring archlinux-keyring sddm; do echo 1.0-1 >"$MOCK/db/$p"; done
-  rm -f "$MOCK"/fail-chroot-* "$MOCK"/{fail-qs-commits,archive-root-403,ipv6-broken,locale,syu-block,aur-down,net-down,norepo,calls.log,forbidden.log,pacman.conf.at-syu} "$MOCK"/fail-makepkg-* "$MOCK"/interrupt-*
+  rm -f "$MOCK"/fail-chroot-* "$MOCK"/{fail-qs-commits,archive-root-403,ipv6-broken,locale,syu-block,aur-down,net-down,norepo,calls.log,forbidden.log,pacman.conf.at-syu} "$MOCK"/fail-makepkg-* "$MOCK"/interrupt-* "$MOCK"/npm-* "$MOCK"/verify-fail
 }
 reset_all() { fresh_db; mk_sysroot; rm -rf -- "$H"; mkdir -p "$H"; }
 
@@ -376,6 +400,14 @@ check "S1 rapport généré" test -f "$H/.local/share/hypr-installer/reports/lat
 check "S1 validation sans échec" grep -q 'Installation terminée\.' "$OUT"
 check "S1 aucune commande disque/chargeur de démarrage, jamais makepkg -s" test ! -s "$MOCK/forbidden.log"
 check "S1 jamais de redémarrage automatique avec --yes" bash -c "! grep -q 'systemctl reboot' '$MOCK/calls.log'"
+check "S1 outils de dev installés (node, python, docker, code…)" bash -c "for p in nodejs npm python python-pipx docker code github-cli; do [[ -f '$MOCK/db/'\$p ]] || exit 1; done"
+check "S1 Brave installé (AUR, dernière version)" bash -c "[[ -f '$MOCK/db/brave-bin' ]] && grep -q '^git ls-remote https://aur.archlinux.org/brave-bin.git HEAD' '$MOCK/calls.log'"
+check "S1 Claude Code installé (installateur officiel)" test -x "$H/.local/bin/claude"
+check "S1 freebuff installé via npm dans ~/.local (sans sudo)" bash -c "[[ -x '$H/.local/bin/freebuff' && \$(cat '$MOCK/npm-prefix') == '$H/.local' ]] && ! grep -q '^sudo npm' '$MOCK/calls.log'"
+check "S1 skills IA installées (3) avec marqueur, modèle exclu" bash -c "for k in pdf docx skill-creator; do [[ -f '$H/.claude/skills/'\$k/SKILL.md && -f '$H/.claude/skills/'\$k/.hypr-installer-managed ]] || exit 1; done; [[ ! -e '$H/.claude/skills/template' ]]"
+check "S1 ~/.local/bin dans le PATH (environment.d, bash, fish)" bash -c "[[ -f '$H/.config/environment.d/90-hypr-installer-path.conf' && -f '$H/.config/fish/conf.d/hypr-installer-path.fish' ]] && grep -q 'hypr-installer: ~/.local/bin' '$H/.bashrc'"
+check "S1 docker.socket activé, groupe docker ajouté" bash -c "grep -q 'gpasswd -a' '$MOCK/calls.log'"
+check "S1 point de reprise 12 écrit" test -f "$STATE/step-12.done"
 
 # =============================================================================
 # S2. Relance après succès : tout est repris, rien n'est recompilé
@@ -385,7 +417,7 @@ run_installer --yes
 check "S2 relance : code 0" test "$RC" -eq 0
 ((RC == 0)) || show_out
 check "S2 étapes 3-11 reprises (aucun makepkg, aucun pacman -S/-U)" test "$(calls '^makepkg |^makechrootpkg |^pacman -(S|U|Syu) ')" -eq 0
-check "S2 tableau : 12/12" grep -q 'Étapes terminées : 12/12' "$OUT"
+check "S2 tableau : 13/13" grep -q 'Étapes terminées : 13/13' "$OUT"
 
 # =============================================================================
 # S3. Échec makepkg code 8 à l'étape 3 (cas signalé), puis reprise
@@ -411,7 +443,7 @@ pkgs_before=$(ls "$MOCK/db" | wc -l)
 run_installer --yes
 check "S3 reprise après correction : code 0" test "$RC" -eq 0
 ((RC == 0)) || show_out
-check "S3 reprise : AUR déjà compilés non recompilés" test "$(calls '^makepkg --noconfirm -f -c --log')" -eq 1
+check "S3 reprise : AUR déjà compilés non recompilés" test "$(grep -E '^makepkg --noconfirm -f -c --log' "$MOCK/calls.log" | grep -vc '@brave-bin$')" -eq 1
 check "S3 reprise : enregistrement d'échec effacé" test ! -f "$STATE/step-3.failed"
 check "S3 paquets présents avant la reprise conservés" test "$(ls "$MOCK/db" | wc -l)" -ge "$pkgs_before"
 
@@ -541,6 +573,119 @@ run_installer --yes
 check "S9 dépendance absente : arrêt contrôlé" test "$RC" -eq 1
 check "S9 dépendance nommée dans le message" grep -q 'scdoc' "$OUT"
 check "S9 makepkg non lancé pour wlogout" bash -c "! grep -q '^makepkg --noconfirm.*@wlogout$' '$MOCK/calls.log'"
+
+# =============================================================================
+# S13. Étape 12 : relance idempotente, skills personnelles préservées
+# =============================================================================
+reset_all
+mkdir -p "$H/.claude/skills/pdf"; echo "ma skill" >"$H/.claude/skills/pdf/SKILL.md"
+run_installer --yes
+check "S13 installation avec skill personnelle : code 0" test "$RC" -eq 0
+check "S13 skill personnelle « pdf » jamais écrasée" grep -qx 'ma skill' "$H/.claude/skills/pdf/SKILL.md"
+check "S13 conservation annoncée" grep -q 'personnelle(s) conservée(s)' "$OUT"
+: >"$MOCK/calls.log"
+run_installer --yes
+check "S13 relance : rien de réinstallé (ni Brave, ni npm, ni Claude Code)" bash -c "[[ $RC -eq 0 ]] && ! grep -qE '^(makepkg --noconfirm|npm install|curl .*claude.ai)' '$MOCK/calls.log'"
+check "S13 .bashrc : une seule ligne PATH" test "$(grep -c 'hypr-installer: ~/.local/bin' "$H/.bashrc")" -eq 1
+rm -rf "$H/.local/bin/claude"
+run_installer --yes
+check "S13 Claude Code supprimé : réinstallé à la relance" bash -c "[[ $RC -eq 0 && -x '$H/.local/bin/claude' ]]"
+
+# =============================================================================
+# S14. --no-dev, et échec npm non bloquant
+# =============================================================================
+reset_all
+run_installer --yes --no-dev
+check "S14 --no-dev : code 0, rien d'installé" bash -c "[[ $RC -eq 0 && ! -f '$MOCK/db/brave-bin' && ! -f '$MOCK/db/nodejs' && ! -e '$H/.local/bin/claude' ]]"
+check "S14 --no-dev : signalé dans la validation" grep -q 'non installés (--no-dev)' "$OUT"
+run_installer --diagnose
+check "S14 --diagnose après --no-dev : étape 12 non signalée en échec" test "$RC" -eq 0
+reset_all
+: >"$MOCK/npm-fail"
+run_installer --yes
+check "S14 échec npm : installation terminée (avertissement)" bash -c "[[ $RC -eq 0 ]] && grep -q 'installation de freebuff impossible' '$OUT'"
+rm -f "$MOCK/npm-fail"
+reset_all
+echo claude.ai >"$MOCK/net-down"
+run_installer --yes
+check "S14 claude.ai injoignable : installation terminée, avertissement clair" bash -c "[[ $RC -eq 0 ]] && grep -q 'Claude Code non installé' '$OUT' && [[ -f '$STATE/step-12.done' ]]"
+rm -f "$MOCK/net-down"
+run_installer --yes
+check "S14 réseau revenu : Claude Code installé à la relance" bash -c "[[ $RC -eq 0 && -x '$H/.local/bin/claude' ]]"
+
+# =============================================================================
+# S15. --dotfiles <dépôt> puis --dotfiles-restore
+# =============================================================================
+DF="$T/dots-repo"
+mk_dots() {
+  rm -rf "$DF"; mkdir -p "$DF/.config/hypr" "$DF/.config/waybar" "$DF/.config/kitty" "$DF/.git"
+  printf 'hl.config({ general = { gaps_in = 3 } })\n' >"$DF/.config/hypr/hyprland.lua"
+  echo '{"layer":"top"}' >"$DF/.config/waybar/config.jsonc"
+  echo 'font_size 13' >"$DF/.config/kitty/kitty.conf"
+  echo 'export DOTS=1' >"$DF/.zshrc"
+  printf '#!/bin/sh\ntouch "%s"\n' "$MOCK/dots-script-ran" >"$DF/install.sh"; chmod +x "$DF/install.sh"
+  printf 'waybar\n# commentaire\ngrub\nlinux-zen\nyay-bin\n' >"$DF/packages.txt"
+}
+reset_all
+run_installer --yes
+kitty_before=$(cat "$H/.config/kitty/kitty.conf")
+mk_dots; echo yay-bin >"$MOCK/norepo"
+run_installer --yes --dotfiles "$DF"
+check "S15 dotfiles : code 0" test "$RC" -eq 0
+((RC == 0)) || show_out
+check "S15 waybar, kitty, hypr, .zshrc appliqués" bash -c "[[ -f '$H/.config/waybar/config.jsonc' && \$(cat '$H/.config/kitty/kitty.conf') == 'font_size 13' && -f '$H/.zshrc' ]] && grep -q gaps_in '$H/.config/hypr/hyprland.lua'"
+check "S15 AZERTY ré-appliqué par-dessus les dotfiles" bash -c "grep -qF 'hypr-installer : AZERTY' '$H/.config/hypr/hyprland.lua' && grep -q 'kb_layout = \"fr\"' '$H/.config/hypr/hypr-installer-azerty.lua' && grep -q 'SUPER + code:' '$H/.config/hypr/hypr-installer-azerty.lua'"
+check "S15 paquets nécessaires installés (waybar, zsh)" bash -c "[[ -f '$MOCK/db/waybar' && -f '$MOCK/db/zsh' ]]"
+check "S15 jamais de paquet de démarrage/noyau (grub, linux-zen)" bash -c "[[ ! -f '$MOCK/db/grub' && ! -f '$MOCK/db/linux-zen' ]]"
+check "S15 script du dépôt NON exécuté" test ! -e "$MOCK/dots-script-ran"
+check "S15 aucune commande disque/chargeur de démarrage" test ! -s "$MOCK/forbidden.log"
+check "S15 install.sh du dépôt non copié dans ~" test ! -e "$H/install.sh"
+run_installer --yes --dotfiles-restore
+check "S15 restauration : code 0" test "$RC" -eq 0
+check "S15 restauration : kitty d'origine, waybar et .zshrc retirés" bash -c "[[ \$(cat '$H/.config/kitty/kitty.conf') == '$kitty_before' && ! -e '$H/.config/waybar' && ! -e '$H/.zshrc' ]]"
+check "S15 restauration : configuration Hyprland end-4 d'origine" bash -c "grep -q 'hyprland.lib' '$H/.config/hypr/hyprland.lua' && ! grep -q 'hypr-installer : AZERTY' '$H/.config/hypr/hyprland.lua' && [[ -f '$H/.config/hypr/custom/keybinds.lua' ]]"
+check "S15 restauration : état « dotfiles actifs » effacé" test ! -e "$STATE/dotfiles.active"
+run_installer --yes --dotfiles-restore
+check "S15 seconde restauration : refus explicite" bash -c "[[ $RC -ne 0 ]] && grep -q 'Aucune application de dotfiles' '$OUT'"
+
+# =============================================================================
+# S16. Dotfiles incompatibles ou refusés par Hyprland : bureau préservé
+# =============================================================================
+mk_dots; rm "$DF/.config/hypr/hyprland.lua"; echo 'general { gaps_in = 3 }' >"$DF/.config/hypr/hyprland.conf"
+run_installer --yes --dotfiles "$DF"
+check "S16 hyprland.conf seul : config Hyprland conservée, reste appliqué" bash -c "[[ $RC -eq 0 && ! -e '$H/.config/hypr/hyprland.conf' && -f '$H/.config/waybar/config.jsonc' ]] && grep -q 'hyprland.lib' '$H/.config/hypr/hyprland.lua'"
+check "S16 avertissement hyprland.lua" grep -q 'n’accepte que hyprland.lua' "$OUT"
+check "S16 config end-4 conservée intacte (pas de crochet AZERTY ajouté)" bash -c "! grep -q 'hypr-installer : AZERTY' '$H/.config/hypr/hyprland.lua' && [[ ! -e '$H/.config/hypr/hypr-installer-azerty.lua' ]]"
+run_installer --yes --dotfiles-restore
+mk_dots; : >"$MOCK/verify-fail"
+run_installer --yes --dotfiles "$DF"
+rm -f "$MOCK/verify-fail"
+check "S16 config refusée par --verify-config : ancienne remise" bash -c "[[ $RC -eq 0 ]] && grep -q 'hyprland.lib' '$H/.config/hypr/hyprland.lua' && ! grep -q gaps_in '$H/.config/hypr/hyprland.lua'"
+check "S16 refus annoncé" grep -q 'refusée par Hyprland --verify-config' "$OUT"
+run_installer --yes --dotfiles-restore
+check "S16 restauration après refus : code 0, waybar retiré" bash -c "[[ $RC -eq 0 && ! -e '$H/.config/waybar' ]] && grep -q 'hyprland.lib' '$H/.config/hypr/hyprland.lua'"
+
+# =============================================================================
+# S17. Réinstallation d'end-4 par-dessus des dotfiles ; dépôts stow et « .config »
+# =============================================================================
+mk_dots
+run_installer --yes --dotfiles "$DF"
+run_installer --yes
+check "S17 relance de l'installateur : end-4 remis par-dessus les dotfiles" bash -c "[[ $RC -eq 0 ]] && grep -q 'hyprland.lib' '$H/.config/hypr/hyprland.lua' && [[ ! -e '$STATE/dotfiles.active' ]]"
+check "S17 avertissement dotfiles actifs" grep -q 'Des dotfiles sont appliqués' "$OUT"
+rm -rf "$DF"; mkdir -p "$DF/waybar/.config/waybar" "$DF/kitty/.config/kitty"
+echo stow >"$DF/waybar/.config/waybar/config.jsonc"; echo 'font_size 9' >"$DF/kitty/.config/kitty/kitty.conf"
+run_installer --yes --dotfiles "$DF"
+check "S17 dépôt GNU Stow reconnu" bash -c "[[ $RC -eq 0 ]] && grep -qx stow '$H/.config/waybar/config.jsonc' && grep -q 'font_size 9' '$H/.config/kitty/kitty.conf'"
+run_installer --yes --dotfiles-restore
+rm -rf "$DF"; mkdir -p "$DF/waybar" "$DF/screenshots"; echo bar >"$DF/waybar/config"; echo png >"$DF/screenshots/a.png"; echo '# README' >"$DF/README.md"
+run_installer --yes --dotfiles "$DF"
+check "S17 dépôt = ~/.config reconnu, captures et README ignorés" bash -c "[[ $RC -eq 0 && -f '$H/.config/waybar/config' && ! -e '$H/.config/screenshots' && ! -e '$H/.config/README.md' ]]"
+rm -rf "$DF"; mkdir -p "$DF/random"; echo x >"$DF/random/file"
+run_installer --yes --dotfiles "$DF"
+check "S17 organisation inconnue : refus sans rien modifier" bash -c "[[ $RC -ne 0 ]] && grep -q 'Organisation du dépôt non reconnue' '$OUT' && [[ ! -e '$H/.config/random' ]]"
+run_installer --yes --dotfiles "ftp://exemple/x"
+check "S17 lien invalide refusé" bash -c "[[ $RC -ne 0 ]] && grep -q 'Lien invalide' '$OUT'"
 
 echo
 echo "Résultat : $PASS réussis, $FAILN échoués"
