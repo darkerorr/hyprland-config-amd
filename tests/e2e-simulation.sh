@@ -203,6 +203,7 @@ echo "==> Finished making"'
 
 mock makechrootpkg "$LOGCALL"'
 source ./PKGBUILD >/dev/null 2>&1
+if [[ -f $MOCK/fail-chroot-$pkgname ]]; then echo "CMake step for glaze failed: 1"; echo "==> ERROR: A failure occurred in build()."; exit 4; fi
 echo pkg >"$PWD/$pkgname-$pkgver-$pkgrel-x86_64.pkg.tar.zst"'
 mock mkarchroot "$LOGCALL"'; mkdir -p "$1"'
 mock arch-nspawn "$LOGCALL"
@@ -334,7 +335,7 @@ done
 fresh_db() {
   rm -rf -- "$MOCK/db"; mkdir -p "$MOCK/db"
   for p in base linux pacman sudo git curl networkmanager firefox endeavouros-keyring archlinux-keyring sddm; do echo 1.0-1 >"$MOCK/db/$p"; done
-  rm -f "$MOCK"/{fail-qs-commits,archive-root-403,ipv6-broken,locale,syu-block,aur-down,net-down,norepo,calls.log,forbidden.log,pacman.conf.at-syu} "$MOCK"/fail-makepkg-* "$MOCK"/interrupt-*
+  rm -f "$MOCK"/fail-chroot-* "$MOCK"/{fail-qs-commits,archive-root-403,ipv6-broken,locale,syu-block,aur-down,net-down,norepo,calls.log,forbidden.log,pacman.conf.at-syu} "$MOCK"/fail-makepkg-* "$MOCK"/interrupt-*
 }
 reset_all() { fresh_db; mk_sysroot; rm -rf -- "$H"; mkdir -p "$H"; }
 
@@ -360,7 +361,9 @@ reset_all
 run_installer --yes
 check "S1 installation complète : code 0" test "$RC" -eq 0
 ((RC == 0)) || show_out
-check "S1 hyprland 0.54.3-4 recompilé contre le système actuel (.1)" test "$(inst_ver hyprland)" = "${PIN_VER[hyprland]}.1"
+check "S1 hyprland 0.54.3-4 (binaire archivé, non recompilable)" test "$(inst_ver hyprland)" = "${PIN_VER[hyprland]}"
+check "S1 aquamarine recompilé et corrigé (.1)" test "$(inst_ver aquamarine)" = "${PIN_VER[aquamarine]}.1"
+check "S1 Hyprland jamais recompilé (glaze)" bash -c "! grep -q '^makechrootpkg.*@hyprland$' '$MOCK/calls.log'"
 check "S1 hyprgraphics recompilé (.1)" test "$(inst_ver hyprgraphics)" = "${PIN_VER[hyprgraphics]}.1"
 check "S1 paquet local Space Grotesk installé et fournit otf-space-grotesk" test -f "$MOCK/db/provides-otf-space-grotesk"
 check "S1 méta fonts-themes installé (dépendance otf-space-grotesk satisfaite)" test -f "$MOCK/db/illogical-impulse-fonts-themes"
@@ -533,8 +536,25 @@ run_installer --yes
 check "S13 relance après mise à jour : code 0" test "$RC" -eq 0
 ((RC == 0)) || show_out
 check "S13 aquamarine archivé remplacé par la version recompilée" test "$(inst_ver aquamarine)" = "${PIN_VER[aquamarine]}.1"
-check "S13 hyprland archivé remplacé par la version recompilée" test "$(inst_ver hyprland)" = "${PIN_VER[hyprland]}.1"
+check "S13 hyprland conservé en binaire archivé" test "$(inst_ver hyprland)" = "${PIN_VER[hyprland]}"
 check "S13 correctif aquamarine présent dans le PKGBUILD" grep -q 'pin_patch_aquamarine' "$H/.cache/hypr-installer/build/arch/aquamarine/PKGBUILD"
+
+# =============================================================================
+# S14. Compilation d'un paquet « srcpref » impossible : repli sur le binaire
+# =============================================================================
+reset_all
+: >"$MOCK/fail-chroot-hyprtoolkit"
+run_installer --yes
+check "S14 échec de compilation de hyprtoolkit : installation terminée quand même" test "$RC" -eq 0
+((RC == 0)) || show_out
+check "S14 hyprtoolkit : binaire archivé utilisé" test "$(inst_ver hyprtoolkit)" = "${PIN_VER[hyprtoolkit]}"
+check "S14 repli signalé" grep -q 'hyprtoolkit : recompilation impossible' "$OUT"
+rm -f "$MOCK/fail-chroot-hyprtoolkit"
+reset_all
+: >"$MOCK/fail-chroot-hyprlock"
+run_installer --yes
+check "S14 échec d'un paquet « src » (hyprlock) : arrêt contrôlé" test "$RC" -eq 1
+rm -f "$MOCK/fail-chroot-hyprlock"
 
 # =============================================================================
 # S9. Dépendance AUR absente des dépôts : arrêt AVANT makepkg, cause explicite

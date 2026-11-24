@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="2.1.0"
+readonly INSTALLER_VERSION="2.1.1"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
 readonly CHECKPOINT_SCHEMA=3
 readonly MAIN_PID=$$
@@ -70,15 +70,20 @@ declare -Ar PIN_VER=(
 #       chroot propre (devtools), contre les bibliothèques actuelles :
 #         hyprgraphics -> libjxl.so.0.11 n'existe plus (0.13 aujourd'hui)
 #         hyprlock, xdph -> sdbus-cpp 2.3 (Arch a dû reconstruire hyprlock)
-# Toute la pile est recompilée dans un chroot propre CONTRE LE SYSTÈME ACTUEL
-# (Mesa, libglvnd, Qt, GCC de novembre 2026). Les binaires archivés de mars
-# 2026 mélangés à un système plus récent ont provoqué l'arrêt de Hyprland au
-# démarrage (std::logic_error dans aquamarine, signal 6) sur la machine cible.
+# Modes :
+#   src     : toujours recompilé dans le chroot (binaire archivé incompatible avec
+#             le système actuel : hyprgraphics, hyprlock, xdph — compilation
+#             confirmée sur la machine cible) ;
+#   srcpref : recompilé contre le système actuel (Mesa, libglvnd, GCC récents) ;
+#             si la compilation échoue, repli sur le binaire archivé vérifié ;
+#   bin     : binaire archivé uniquement. Hyprland 0.54.3 ne se recompile plus :
+#             hyprpm exige glaze 7.x, introuvable dans les dépôts actuels, et le
+#             téléchargement de secours est impossible dans le chroot (constaté).
 declare -Ar PIN_MODE=(
-  [hyprutils]=src [hyprlang]=src [hyprwayland-scanner]=src [hyprwire]=src
-  [hyprgraphics]=src [hyprcursor]=src [aquamarine]=src [hyprtoolkit]=src
-  [hyprland-guiutils]=src [hyprland]=src [hypridle]=src [hyprlock]=src
-  [hyprpicker]=src [hyprsunset]=src [xdg-desktop-portal-hyprland]=src
+  [hyprutils]=srcpref [hyprlang]=srcpref [hyprwayland-scanner]=srcpref [hyprwire]=srcpref
+  [hyprgraphics]=src  [hyprcursor]=srcpref [aquamarine]=srcpref [hyprtoolkit]=srcpref
+  [hyprland-guiutils]=srcpref [hyprland]=bin [hypridle]=srcpref [hyprlock]=src
+  [hyprpicker]=srcpref [hyprsunset]=srcpref [xdg-desktop-portal-hyprland]=src
 )
 # SHA-256 des paquets *.pkg.tar.zst de l'Arch Linux Archive (calculés à l'audit).
 declare -Ar PIN_SHA256=(
@@ -641,7 +646,7 @@ is_pinned() { local p; for p in "${PIN_ORDER[@]}"; do [[ $p == "$1" ]] && return
 
 target_pin_version() {
   local n=$1
-  if [[ ${PIN_MODE[$n]} == src ]]; then
+  if [[ ${PIN_MODE[$n]} == src || ${PIN_MODE[$n]} == srcpref ]]; then
     printf '%s%s' "${PIN_VER[$n]}" "$LOCAL_REL_SUFFIX"
   else
     printf '%s' "${PIN_VER[$n]}"
@@ -997,7 +1002,7 @@ resolve_versions() {
   # Disponibilité des paquets épinglés dans l'Arch Linux Archive.
   local n url
   for n in "${PIN_ORDER[@]}"; do
-    [[ ${PIN_MODE[$n]} == bin ]] || continue
+    [[ ${PIN_MODE[$n]} == src ]] && continue
     url="$ALA_URL/${n:0:1}/$n/$n-${PIN_VER[$n]}-x86_64.pkg.tar.zst"
     url_exists "$url" || die "Paquet épinglé indisponible dans l’Arch Linux Archive : $url (${NET_LAST_ERROR:-?})"
   done
@@ -1597,7 +1602,7 @@ install_hyprland() {
   # 2) reconstructions en chroot propre (dans l'ordre des dépendances)
   for n in "${PIN_ORDER[@]}"; do
     local need_src=0 cached="" rebuild=0
-    [[ ${PIN_MODE[$n]} == src ]] && need_src=1
+    [[ ${PIN_MODE[$n]} == src || ${PIN_MODE[$n]} == srcpref ]] && need_src=1
     [[ " ${broken[*]} " == *" $n "* ]] && { need_src=1; rebuild=1; }
     [[ " ${forced[*]} " == *" $n "* ]] && { need_src=1; rebuild=1; }
     ((need_src)) || continue
@@ -1606,7 +1611,19 @@ install_hyprland() {
     [[ -n $(state_get chroot.prepared-run) && $(state_get chroot.prepared-run) == "$RUN_TS" ]] || { prepare_chroot; state_set chroot.prepared-run "$RUN_TS"; }
     local -a inj=() m
     for m in "${PIN_ORDER[@]}"; do [[ $m == "$n" ]] && break; [[ -n ${file[$m]:-} ]] && inj+=("${file[$m]}"); done
-    file[$n]=$(build_pin_src "$n" "${inj[@]}")
+    if f=$(build_pin_src "$n" "${inj[@]}"); then
+      file[$n]=$f
+      [[ $n == aquamarine ]] && rm -f -- "$STATE_DIR/aquamarine.fallback"
+    elif [[ ${PIN_MODE[$n]} != src ]]; then
+      # Compilation impossible : repli sur le binaire archivé vérifié, jamais d'arrêt.
+      LAST_CAUSE=$(explain_failure_output "$SPIN_OUTPUT_FILE" | head -n1)
+      rm -f -- "$TMP_DIR/last-error"
+      warn "$n : recompilation impossible (${LAST_CAUSE:-voir journal}) ; binaire archivé vérifié utilisé à la place."
+      f=$(ala_fetch "$n"); file[$n]=$f
+      [[ $n == aquamarine ]] && state_set aquamarine.fallback 1
+    else
+      die "$n : compilation impossible et aucun binaire archivé compatible. ${LAST_CAUSE:-Voir journal.}"
+    fi
   done
   # 3) une seule transaction pour toute la pile (cohérence ABI)
   remove_incompatible_dependents
@@ -2531,6 +2548,7 @@ verify_step_5() {
     v=$(pkg_version "$n")
     if [[ -z $v ]]; then vp_pkg "$n (pile épinglée)"
     elif [[ ${PIN_MODE[$n]} == src && $v != "${PIN_VER[$n]}${LOCAL_REL_SUFFIX}" ]]; then vp "$n $v : version archivée, doit être recompilé contre le système actuel"
+    elif [[ $n == aquamarine && $v != "${PIN_VER[$n]}${LOCAL_REL_SUFFIX}" && ! -f $STATE_DIR/aquamarine.fallback ]]; then vp "aquamarine $v : version archivée non corrigée (plantage au démarrage), à recompiler"
     elif [[ $v != "${PIN_VER[$n]}" && $v != "${PIN_VER[$n]}${LOCAL_REL_SUFFIX}" ]]; then vp "$n en version $v (attendu ${PIN_VER[$n]})"
     fi
   done
@@ -2642,7 +2660,7 @@ diagnose_prereqs() {
     chk_if "Release end-4 $END4_TAG" '[[ $remote == "$END4_COMMIT" ]]' "${END4_COMMIT:0:12}" FAIL "le tag pointe sur ${remote:-?}"
     local n bad=""
     for n in "${PIN_ORDER[@]}"; do
-      [[ ${PIN_MODE[$n]} == bin ]] || continue
+      [[ ${PIN_MODE[$n]} == src ]] && continue
       url_exists "$ALA_URL/${n:0:1}/$n/$n-${PIN_VER[$n]}-x86_64.pkg.tar.zst" || bad+="$n "
     done
     chk_if "Paquets binaires archivés disponibles" '[[ -z $bad ]]' "disponibles (ou pile entièrement recompilée)" FAIL "indisponibles : $bad"
