@@ -360,7 +360,7 @@ reset_all
 run_installer --yes
 check "S1 installation complète : code 0" test "$RC" -eq 0
 ((RC == 0)) || show_out
-check "S1 hyprland 0.54.3-4 installé" test "$(inst_ver hyprland)" = "${PIN_VER[hyprland]}"
+check "S1 hyprland 0.54.3-4 recompilé contre le système actuel (.1)" test "$(inst_ver hyprland)" = "${PIN_VER[hyprland]}.1"
 check "S1 hyprgraphics recompilé (.1)" test "$(inst_ver hyprgraphics)" = "${PIN_VER[hyprgraphics]}.1"
 check "S1 paquet local Space Grotesk installé et fournit otf-space-grotesk" test -f "$MOCK/db/provides-otf-space-grotesk"
 check "S1 méta fonts-themes installé (dépendance otf-space-grotesk satisfaite)" test -f "$MOCK/db/illogical-impulse-fonts-themes"
@@ -521,6 +521,20 @@ printf '%s\n' "$QS_COMMIT" 4f508be500dea6e5732cc3d50382a0048b17e7b1 >"$MOCK/fail
 run_installer --yes
 check "S12 échecs successifs : repli jusqu'au commit le plus récent" bash -c "[[ $RC -eq 0 && \$(cat '$STATE/quickshell.commit') == 9b0f339* ]]"
 rm -f "$MOCK/fail-qs-commits"
+
+# =============================================================================
+# S13. Mise à jour d'une installation 2.0.x (binaires archivés) -> recompilation
+# =============================================================================
+reset_all
+run_installer --yes
+echo "${PIN_VER[aquamarine]}" >"$MOCK/db/aquamarine"; echo "${PIN_VER[hyprland]}" >"$MOCK/db/hyprland"
+for n in "${!PIN_VER[@]}"; do printf '%s %s\n' "$n" "$(inst_ver "$n")"; done >"$H/.local/share/hypr-installer/state/pins.lock"
+run_installer --yes
+check "S13 relance après mise à jour : code 0" test "$RC" -eq 0
+((RC == 0)) || show_out
+check "S13 aquamarine archivé remplacé par la version recompilée" test "$(inst_ver aquamarine)" = "${PIN_VER[aquamarine]}.1"
+check "S13 hyprland archivé remplacé par la version recompilée" test "$(inst_ver hyprland)" = "${PIN_VER[hyprland]}.1"
+check "S13 correctif aquamarine présent dans le PKGBUILD" grep -q 'pin_patch_aquamarine' "$H/.cache/hypr-installer/build/arch/aquamarine/PKGBUILD"
 
 # =============================================================================
 # S9. Dépendance AUR absente des dépôts : arrêt AVANT makepkg, cause explicite

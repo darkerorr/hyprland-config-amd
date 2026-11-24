@@ -13,9 +13,9 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="2.0.7"
+readonly INSTALLER_VERSION="2.1.0"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
-readonly CHECKPOINT_SCHEMA=2
+readonly CHECKPOINT_SCHEMA=3
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -70,11 +70,15 @@ declare -Ar PIN_VER=(
 #       chroot propre (devtools), contre les bibliothèques actuelles :
 #         hyprgraphics -> libjxl.so.0.11 n'existe plus (0.13 aujourd'hui)
 #         hyprlock, xdph -> sdbus-cpp 2.3 (Arch a dû reconstruire hyprlock)
+# Toute la pile est recompilée dans un chroot propre CONTRE LE SYSTÈME ACTUEL
+# (Mesa, libglvnd, Qt, GCC de novembre 2026). Les binaires archivés de mars
+# 2026 mélangés à un système plus récent ont provoqué l'arrêt de Hyprland au
+# démarrage (std::logic_error dans aquamarine, signal 6) sur la machine cible.
 declare -Ar PIN_MODE=(
-  [hyprutils]=bin [hyprlang]=bin [hyprwayland-scanner]=bin [hyprwire]=bin
-  [hyprgraphics]=src [hyprcursor]=bin [aquamarine]=bin [hyprtoolkit]=bin
-  [hyprland-guiutils]=bin [hyprland]=bin [hypridle]=bin [hyprlock]=src
-  [hyprpicker]=bin [hyprsunset]=bin [xdg-desktop-portal-hyprland]=src
+  [hyprutils]=src [hyprlang]=src [hyprwayland-scanner]=src [hyprwire]=src
+  [hyprgraphics]=src [hyprcursor]=src [aquamarine]=src [hyprtoolkit]=src
+  [hyprland-guiutils]=src [hyprland]=src [hypridle]=src [hyprlock]=src
+  [hyprpicker]=src [hyprsunset]=src [xdg-desktop-portal-hyprland]=src
 )
 # SHA-256 des paquets *.pkg.tar.zst de l'Arch Linux Archive (calculés à l'audit).
 declare -Ar PIN_SHA256=(
@@ -993,6 +997,7 @@ resolve_versions() {
   # Disponibilité des paquets épinglés dans l'Arch Linux Archive.
   local n url
   for n in "${PIN_ORDER[@]}"; do
+    [[ ${PIN_MODE[$n]} == bin ]] || continue
     url="$ALA_URL/${n:0:1}/$n/$n-${PIN_VER[$n]}-x86_64.pkg.tar.zst"
     url_exists "$url" || die "Paquet épinglé indisponible dans l’Arch Linux Archive : $url (${NET_LAST_ERROR:-?})"
   done
@@ -1416,6 +1421,41 @@ prepare_chroot() {
   state_set chroot.ready 1
 }
 
+# Correctifs ajoutés au PKGBUILD d'aquamarine 0.11.0 (exécutés dans prepare()).
+# Sur la machine cible, Hyprland s'arrêtait dans aquamarine
+# (« basic_string: construction from null is not valid ») juste après la création
+# du contexte EGL : une chaîne C nulle (glGetString/eglQueryString) convertie en
+# std::string. Correctifs, sans changer l'API ni l'ABI (même soname) :
+#  1. lien sur OpenGL::GLES3 au lieu de OpenGL::OpenGL (correctif amont 892622d) ;
+#  2. chaînes GL/EGL nulles tolérées ; si GL_EXTENSIONS est nul, le contexte est
+#     déclaré inutilisable (erreur journalisée) au lieu d'arrêter Hyprland.
+pin_patch_aquamarine() {
+  cat <<'PATCH'
+
+# --- hypr-installer : correctifs aquamarine (voir install.sh, pin_patch_aquamarine) ---
+if declare -F prepare >/dev/null; then
+  eval "_hypr_installer_orig_prepare() $(declare -f prepare | tail -n +2)"
+else
+  _hypr_installer_orig_prepare() { :; }
+fi
+prepare() {
+  _hypr_installer_orig_prepare
+  local r root
+  r=$(find "$srcdir" -path '*/src/backend/drm/Renderer.cpp' -print -quit)
+  [[ -n $r ]] || { echo "hypr-installer : Renderer.cpp introuvable" >&2; return 1; }
+  root=${r%/src/backend/drm/Renderer.cpp}
+  sed -i 's/OpenGL::EGL OpenGL::OpenGL/OpenGL::EGL OpenGL::GLES3/' "$root/CMakeLists.txt"
+  grep -q 'OpenGL::EGL OpenGL::GLES3' "$root/CMakeLists.txt" || { echo "hypr-installer : correctif CMake non appliqué" >&2; return 1; }
+  sed -i '0,/^#include/s//static inline const char* aqNullSafe(const char* s) { return s ? s : ""; }\n#include/' "$r"
+  sed -i -E 's/= eglQueryString\(([^;]*)\);/= aqNullSafe(eglQueryString(\1));/' "$r"
+  sed -i -E 's/\(char\*\)glGetString\((GL_[A-Z_]+)\)/aqNullSafe((const char*)glGetString(\1))/g' "$r"
+  sed -i 's|EGLEXTENSIONS = (const char\*)glGetString(GL_EXTENSIONS);|{ const char* aqExt = (const char*)glGetString(GL_EXTENSIONS); if (!aqExt) { backend->log(AQ_LOG_ERROR, "CDRMRenderer: glGetString(GL_EXTENSIONS) a renvoyé NULL, moteur de rendu désactivé"); eglDestroyContext(egl.display, egl.context); egl.context = EGL_NO_CONTEXT; return; } EGLEXTENSIONS = aqExt; }|' "$r"
+  grep -q 'const char\* aqExt' "$r" && grep -q 'aqNullSafe(eglQueryString' "$r" \
+    || { echo "hypr-installer : correctif Renderer.cpp non appliqué (source inattendue)" >&2; return 1; }
+}
+PATCH
+}
+
 # Paquet construit (extension quelconque, signature exclue) le plus probable.
 find_built_pkg() {   # find_built_pkg <dossier> <nom> <version-pkgrel>
   local f
@@ -1437,6 +1477,7 @@ build_pin_src() {
   pkgrel=$(awk -F= '/^pkgrel=/{print $2; exit}' "$dir/PKGBUILD")
   [[ "$(awk -F= '/^pkgver=/{print $2; exit}' "$dir/PKGBUILD")-$pkgrel" == "${PIN_VER[$n]}" ]] || die "PKGBUILD $n ne correspond pas à ${PIN_VER[$n]}"
   sed -i "s/^pkgrel=.*/pkgrel=${pkgrel}${LOCAL_REL_SUFFIX}/" "$dir/PKGBUILD"
+  if declare -F "pin_patch_$n" >/dev/null; then "pin_patch_$n" >>"$dir/PKGBUILD"; log "Correctif appliqué au PKGBUILD de $n"; fi
   local -a iargs=()
   for f in "${inject[@]}"; do iargs+=(-I "$f"); done
   (cd "$dir" && spin "Compilation propre de $n ${PIN_VER[$n]} (chroot)" makechrootpkg -c -r "$CHROOT_DIR" "${iargs[@]}") \
@@ -2489,6 +2530,7 @@ verify_step_5() {
   for n in "${PIN_ORDER[@]}"; do
     v=$(pkg_version "$n")
     if [[ -z $v ]]; then vp_pkg "$n (pile épinglée)"
+    elif [[ ${PIN_MODE[$n]} == src && $v != "${PIN_VER[$n]}${LOCAL_REL_SUFFIX}" ]]; then vp "$n $v : version archivée, doit être recompilé contre le système actuel"
     elif [[ $v != "${PIN_VER[$n]}" && $v != "${PIN_VER[$n]}${LOCAL_REL_SUFFIX}" ]]; then vp "$n en version $v (attendu ${PIN_VER[$n]})"
     fi
   done
@@ -2600,9 +2642,10 @@ diagnose_prereqs() {
     chk_if "Release end-4 $END4_TAG" '[[ $remote == "$END4_COMMIT" ]]' "${END4_COMMIT:0:12}" FAIL "le tag pointe sur ${remote:-?}"
     local n bad=""
     for n in "${PIN_ORDER[@]}"; do
+      [[ ${PIN_MODE[$n]} == bin ]] || continue
       url_exists "$ALA_URL/${n:0:1}/$n/$n-${PIN_VER[$n]}-x86_64.pkg.tar.zst" || bad+="$n "
     done
-    chk_if "Pile épinglée dans l’Arch Linux Archive" '[[ -z $bad ]]' "${#PIN_ORDER[@]} paquets disponibles" FAIL "indisponibles : $bad"
+    chk_if "Paquets binaires archivés disponibles" '[[ -z $bad ]]' "disponibles (ou pile entièrement recompilée)" FAIL "indisponibles : $bad"
   else
     chk INFO "Versions distantes" "non vérifiées (réseau indisponible)"
   fi
