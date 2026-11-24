@@ -80,11 +80,11 @@ else
   mkdir -p "$d/quickshell/ii/modules/common/widgets/shapes" "$d/hypr/hyprland/scripts" "$d/hypr/hyprlock" "$d/hypr/custom/scripts" \
     "$d/fish" "$d/fontconfig" "$d/kitty" "$d/xdg-desktop-portal" "$END4_FIX/dots/.local/share/konsole" "$END4_FIX/dots/.local/share/icons" "$END4_FIX/sdata/uv"
   echo 'ShellRoot {}' >"$d/quickshell/ii/shell.qml"
-  printf 'source=hyprland/execs.conf\n' >"$d/hypr/hyprland.conf"
-  printf 'exec-once = qs -c $qsConfig &\n' >"$d/hypr/hyprland/execs.conf"
-  echo 'bind = Super, Q, killactive,' >"$d/hypr/hyprland/keybinds.conf"
-  for f in hyprlock.conf monitors.conf workspaces.conf hypridle.conf; do echo "# $f" >"$d/hypr/$f"; done
-  echo '# custom' >"$d/hypr/custom/general.conf"
+  printf 'require("hyprland.lib")\nrequire("hyprland.execs")\nrequire("hyprland.keybinds")\n' >"$d/hypr/hyprland.lua"
+  printf 'hl.on("hyprland.start", function ()\n    hl.exec_cmd("qs -c $qsConfig")\nend)\n' >"$d/hypr/hyprland/execs.lua"
+  printf 'for i = 1, 10 do\n    local numberkey = { 10, 11, 12, 13, 14, 15, 16, 17, 18, 19 }\n    hl.bind("SUPER + code:" .. numberkey[i], function() end)\nend\n' >"$d/hypr/hyprland/keybinds.lua"
+  for f in hyprlock.conf hypridle.conf; do echo "# $f" >"$d/hypr/$f"; done
+  for f in env execs general keybinds rules variables; do echo "-- custom $f" >"$d/hypr/custom/$f.lua"; done
   echo 'x' >"$d/kitty/kitty.conf"; echo 'x' >"$d/fish/config.fish"; echo 'x' >"$d/fontconfig/fonts.conf"
   echo '[preferred]' >"$d/xdg-desktop-portal/hyprland-portals.conf"
   echo 'x' >"$END4_FIX/dots/.local/share/konsole/a.profile"; echo '<svg/>' >"$END4_FIX/dots/.local/share/icons/illogical-impulse.svg"
@@ -129,7 +129,7 @@ LOGCALL='printf "%s %s @%s\n" "${0##*/}" "$*" "${PWD##*/}" >>"$MOCK/calls.log"'
 
 mock pacman "$LOGCALL"'
 db=$MOCK/db
-inst() { printf "%s\n" "${2:-1.0-1}" >"$db/$1"; }
+inst() { printf "%s\n" "${2:-50.0-1}" >"$db/$1"; }
 args=(); for a in "$@"; do case $a in --print-format) skipnext=1; continue;; esac; if [[ ${skipnext:-0} == 1 ]]; then skipnext=0; continue; fi; [[ $a == -* ]] || args+=("$a"); done
 case $1 in
   -Qq) if (( ${#args[@]} == 0 )); then ls "$db" | grep -v "^provides-" || true; else [[ -f $db/${args[0]} ]]; fi ;;
@@ -137,7 +137,7 @@ case $1 in
   -Qi) [[ -f $db/${args[0]} ]] || exit 1; printf "Name            : %s\nDepends On      : None\nRequired By     : None\n" "${args[0]}" ;;
   -Qlq) exit 0 ;;
   -T) rc=0; for d in "${args[@]}"; do n=${d%%[<>=]*}; [[ -f $db/$n || -f $db/provides-$n ]] || { echo "$d"; rc=127; }; done; exit $rc ;;
-  -Si) grep -qx "${args[0]}" "$MOCK/norepo" 2>/dev/null && exit 1; printf "Version         : 99.0-1\n" ;;
+  -Si) grep -qx "${args[0]}" "$MOCK/norepo" 2>/dev/null && exit 1; printf "Version         : 50.0-1\n" ;;
   -Sp) for p in "${args[@]}"; do grep -qx "$p" "$MOCK/norepo" 2>/dev/null && { echo "error: target not found: $p"; exit 1; }; echo "$p"; done ;;
   -Syu)
     cp "$HYPR_INSTALLER_SYSROOT/etc/pacman.conf" "$MOCK/pacman.conf.at-syu"
@@ -280,7 +280,7 @@ exec "$@"'
 mock vercmp '[[ $1 == "$2" ]] && { echo 0; exit; }; [[ $(printf "%s\n%s\n" "$1" "$2" | sort -V | head -n1) == "$1" ]] && echo -1 || echo 1'
 mock Hyprland '
 case " $* " in
-  *" --version "*) v=$(cat "$MOCK/db/hyprland" 2>/dev/null || echo 0.57.2-1); echo "Hyprland ${v%-*} built from branch"; ;;
+  *" --version "*) [[ -f $MOCK/db/hyprland ]] || exit 1; v=$(cat "$MOCK/db/hyprland"); echo "Hyprland ${v%-*} built from branch"; ;;
   *" --verify-config "*) echo "config ok" ;;
 esac'
 mock quickshell 'exit 0'; mock qs 'exit 0'
@@ -361,15 +361,15 @@ reset_all
 run_installer --yes
 check "S1 installation complète : code 0" test "$RC" -eq 0
 ((RC == 0)) || show_out
-check "S1 hyprland 0.54.3-4 (binaire archivé, non recompilable)" test "$(inst_ver hyprland)" = "${PIN_VER[hyprland]}"
-check "S1 aquamarine recompilé et corrigé (.1)" test "$(inst_ver aquamarine)" = "${PIN_VER[aquamarine]}.1"
-check "S1 Hyprland jamais recompilé (glaze)" bash -c "! grep -q '^makechrootpkg.*@hyprland$' '$MOCK/calls.log'"
-check "S1 hyprgraphics recompilé (.1)" test "$(inst_ver hyprgraphics)" = "${PIN_VER[hyprgraphics]}.1"
+check "S1 Hyprland installé depuis les dépôts" test "$(inst_ver hyprland)" = "50.0-1"
+check "S1 aucune compilation de la pile Hyprland (ni chroot, ni archive)" bash -c "! grep -qE '^(makechrootpkg|mkarchroot)' '$MOCK/calls.log' && ! grep -q 'archive.archlinux.org/packages' '$MOCK/calls.log'"
+check "S1 configuration Lua d'end-4 déployée" test -f "$H/.config/hypr/hyprland.lua"
+check "S1 AZERTY : kb_layout fr (Lua)" grep -q 'kb_layout = "fr"' "$H/.config/hypr/custom/general.lua"
+check "S1 AZERTY : bureaux par touches physiques + conflits 4/6 retirés" bash -c "grep -q 'SUPER + ALT + code:' '$H/.config/hypr/custom/keybinds.lua' && grep -q 'hl.unbind(\"SUPER + Minus\")' '$H/.config/hypr/custom/keybinds.lua'"
+check "S1 premier démarrage branché (Lua)" grep -q -- '--first-login' "$H/.config/hypr/custom/execs.lua"
 check "S1 paquet local Space Grotesk installé et fournit otf-space-grotesk" test -f "$MOCK/db/provides-otf-space-grotesk"
 check "S1 méta fonts-themes installé (dépendance otf-space-grotesk satisfaite)" test -f "$MOCK/db/illogical-impulse-fonts-themes"
-check "S1 IgnorePkg écrit dans pacman.conf" grep -q '^IgnorePkg = hyprutils' "$SR/etc/pacman.conf"
-check "S1 IgnorePkg ajouté APRÈS pacman -Syu (pile non encore installée)" \
-  bash -c "[[ -f '$MOCK/pacman.conf.at-syu' ]] && ! grep -q 'IgnorePkg' '$MOCK/pacman.conf.at-syu'"
+check "S1 aucun IgnorePkg dans pacman.conf" bash -c "! grep -q 'IgnorePkg' '$SR/etc/pacman.conf'"
 check "S1 points de reprise 3 à 11 écrits" bash -c "for i in 3 4 5 6 7 8 9 10 11; do [[ -f '$STATE'/step-\$i.done ]] || exit 1; done"
 check "S1 aucun échec enregistré" bash -c "! ls '$STATE'/step-*.failed 2>/dev/null | grep -q ."
 check "S1 rapport généré" test -f "$H/.local/share/hypr-installer/reports/latest-install.txt"
@@ -383,6 +383,7 @@ check "S1 jamais de redémarrage automatique avec --yes" bash -c "! grep -q 'sys
 : >"$MOCK/calls.log"
 run_installer --yes
 check "S2 relance : code 0" test "$RC" -eq 0
+((RC == 0)) || show_out
 check "S2 étapes 3-11 reprises (aucun makepkg, aucun pacman -S/-U)" test "$(calls '^makepkg |^makechrootpkg |^pacman -(S|U|Syu) ')" -eq 0
 check "S2 tableau : 12/12" grep -q 'Étapes terminées : 12/12' "$OUT"
 
@@ -456,20 +457,28 @@ run_installer --diagnose
 check "S6 diagnostic après installation : tout conforme" bash -c "[[ $RC -eq 0 ]] && grep -q 'Toutes les étapes sont terminées' '$OUT'"
 
 # =============================================================================
-# S7. -Syu bloqué par la pile épinglée (bibliothèque mise à jour), mode --repair
+# S7. Mise à jour d'une installation 2.x (pile 0.54.3 figée) vers les dépôts
 # =============================================================================
-echo hyprgraphics >"$MOCK/syu-block"
+reset_all
+run_installer --yes
+# État laissé par la 2.1.x : versions figées/recompilées, IgnorePkg, hook, verrou, chroot.
+echo 0.54.3-4 >"$MOCK/db/hyprland"; echo 0.11.0-2.1 >"$MOCK/db/aquamarine"; echo 0.13.1-1.1 >"$MOCK/db/hyprutils"
+awk '/^\[options\]/{print "# hypr-installer: pile Hyprland 0.54.3 épinglée (ne pas retirer, voir README)"; print "IgnorePkg = hyprutils hyprland aquamarine"} {print}' "$SR/etc/pacman.conf" >"$SR/etc/pacman.conf.n" && mv "$SR/etc/pacman.conf.n" "$SR/etc/pacman.conf"
+mkdir -p "$SR/etc/pacman.d/hooks" "$SR/usr/local/lib/hypr-installer" "$H/.cache/hypr-installer/chroot/root" "$H/.cache/hypr-installer/pkgs/built"
+echo x >"$SR/etc/pacman.d/hooks/zz-hypr-installer-pin-check.hook"; echo x >"$SR/usr/local/lib/hypr-installer/pin-check.sh"
+echo "hyprland 0.54.3-4" >"$STATE/pins.lock"; echo x >"$H/.cache/hypr-installer/pkgs/built/aquamarine-0.11.0-2.1-x86_64.pkg.tar.zst"
+for f in "$STATE"/step-*.done; do echo cle-schema-3 >"$f"; done   # points de reprise d'une 2.x (schéma 3)
+printf 'source = hyprland/env.conf\n' >"$H/.config/hypr/hyprland.conf"
+printf '# MANAGED-BY: hypr-installer\ninput {\n kb_layout = fr\n}\n' >"$H/.config/hypr/custom/general.conf"
 : >"$MOCK/calls.log"
-run_installer --repair --yes
-check "S7 réparation avec blocage -Syu : code 0" test "$RC" -eq 0
+run_installer --yes
+check "S7 migration 2.x : code 0" test "$RC" -eq 0
 ((RC == 0)) || show_out
-check "S7 paquet bloquant retiré puis -Syu relancé" test "$(calls '^pacman -Syu')" -ge 2
-check "S7 hyprgraphics recompilé en chroot" test "$(calls '^makechrootpkg')" -ge 1
-check "S7 hyprgraphics réinstallé à la bonne version" test "$(inst_ver hyprgraphics)" = "${PIN_VER[hyprgraphics]}.1"
-check "S7 état pins.force-src nettoyé" test ! -f "$STATE/pins.force-src"
-check "S7 pile déjà installée : IgnorePkg actif PENDANT -Syu" grep -q '^IgnorePkg' "$MOCK/pacman.conf.at-syu"
-check "S7 réparation : AUR intacts non recompilés" test "$(calls '^makepkg --noconfirm -f -c --log')" -eq 0
-rm -f "$MOCK/syu-block"
+check "S7 IgnorePkg retiré AVANT pacman -Syu" bash -c "! grep -q 'IgnorePkg' '$MOCK/pacman.conf.at-syu' && ! grep -q 'IgnorePkg' '$SR/etc/pacman.conf'"
+check "S7 paquets Hyprland mis à jour dans la même transaction que -Syu" grep -qE '^pacman -Syu --noconfirm .*hyprland' "$MOCK/calls.log"
+check "S7 hyprland, aquamarine, hyprutils = versions des dépôts" bash -c "[[ \$(cat '$MOCK/db/hyprland') == 50.0-1 && \$(cat '$MOCK/db/aquamarine') == 50.0-1 && \$(cat '$MOCK/db/hyprutils') == 50.0-1 ]]"
+check "S7 hook, verrou et chroot de la 2.x supprimés" bash -c "[[ ! -e '$SR/etc/pacman.d/hooks/zz-hypr-installer-pin-check.hook' && ! -e '$STATE/pins.lock' && ! -e '$H/.cache/hypr-installer/chroot' && ! -e '$H/.cache/hypr-installer/pkgs/built' ]]"
+check "S7 ancienne config hyprlang mise de côté, fichiers gérés .conf retirés" bash -c "[[ ! -e '$H/.config/hypr/hyprland.conf' && -e '$H/.config/hypr/hyprland.conf.hyprlang-old' && ! -e '$H/.config/hypr/custom/general.conf' ]]"
 
 # =============================================================================
 # S8. AUR injoignable : miroir GitHub officiel utilisé
@@ -511,50 +520,17 @@ check "S11 paquets obsolètes retirés" bash -c "[[ ! -f '$MOCK/db/html2markdown
 check "S11 nettoyage annoncé" grep -q 'Restes des exécutions précédentes nettoyés' "$OUT"
 
 # =============================================================================
-# S12. Qt 6.12 : commit Quickshell épinglé incompatible -> version corrigée
+# S12. Quickshell : commit épinglé par end-4 qui ne compile pas -> repli
 # =============================================================================
 reset_all
 echo 6.12.0-5 >"$MOCK/db/qt6-base"
 run_installer --yes
-check "S12 Qt 6.12 : installation terminée" test "$RC" -eq 0
-((RC == 0)) || show_out
-check "S12 Qt 6.12 : commit épinglé non tenté, v0.3.2 utilisé" bash -c "[[ \$(cat '$STATE/quickshell.commit') == 4f508be* ]]"
+check "S12 Qt 6.12 : commit d'end-4 (v0.3.2) utilisé" bash -c "[[ $RC -eq 0 && \$(cat '$STATE/quickshell.commit') == 4f508be* ]]"
 reset_all
-printf '%s\n' "$QS_COMMIT" 4f508be500dea6e5732cc3d50382a0048b17e7b1 >"$MOCK/fail-qs-commits"
+printf '%s\n' "$QS_COMMIT" >"$MOCK/fail-qs-commits"
 run_installer --yes
-check "S12 échecs successifs : repli jusqu'au commit le plus récent" bash -c "[[ $RC -eq 0 && \$(cat '$STATE/quickshell.commit') == 9b0f339* ]]"
+check "S12 échec du commit épinglé : repli sur le commit plus récent" bash -c "[[ $RC -eq 0 && \$(cat '$STATE/quickshell.commit') == 9b0f339* ]]"
 rm -f "$MOCK/fail-qs-commits"
-
-# =============================================================================
-# S13. Mise à jour d'une installation 2.0.x (binaires archivés) -> recompilation
-# =============================================================================
-reset_all
-run_installer --yes
-echo "${PIN_VER[aquamarine]}" >"$MOCK/db/aquamarine"; echo "${PIN_VER[hyprland]}" >"$MOCK/db/hyprland"
-for n in "${!PIN_VER[@]}"; do printf '%s %s\n' "$n" "$(inst_ver "$n")"; done >"$H/.local/share/hypr-installer/state/pins.lock"
-run_installer --yes
-check "S13 relance après mise à jour : code 0" test "$RC" -eq 0
-((RC == 0)) || show_out
-check "S13 aquamarine archivé remplacé par la version recompilée" test "$(inst_ver aquamarine)" = "${PIN_VER[aquamarine]}.1"
-check "S13 hyprland conservé en binaire archivé" test "$(inst_ver hyprland)" = "${PIN_VER[hyprland]}"
-check "S13 correctif aquamarine présent dans le PKGBUILD" grep -q 'pin_patch_aquamarine' "$H/.cache/hypr-installer/build/arch/aquamarine/PKGBUILD"
-
-# =============================================================================
-# S14. Compilation d'un paquet « srcpref » impossible : repli sur le binaire
-# =============================================================================
-reset_all
-: >"$MOCK/fail-chroot-hyprtoolkit"
-run_installer --yes
-check "S14 échec de compilation de hyprtoolkit : installation terminée quand même" test "$RC" -eq 0
-((RC == 0)) || show_out
-check "S14 hyprtoolkit : binaire archivé utilisé" test "$(inst_ver hyprtoolkit)" = "${PIN_VER[hyprtoolkit]}"
-check "S14 repli signalé" grep -q 'hyprtoolkit : recompilation impossible' "$OUT"
-rm -f "$MOCK/fail-chroot-hyprtoolkit"
-reset_all
-: >"$MOCK/fail-chroot-hyprlock"
-run_installer --yes
-check "S14 échec d'un paquet « src » (hyprlock) : arrêt contrôlé" test "$RC" -eq 1
-rm -f "$MOCK/fail-chroot-hyprlock"
 
 # =============================================================================
 # S9. Dépendance AUR absente des dépôts : arrêt AVANT makepkg, cause explicite

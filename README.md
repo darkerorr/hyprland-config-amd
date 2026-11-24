@@ -1,6 +1,8 @@
 # Hyprland One-Click Installer
 
-**EndeavourOS × Hyprland 0.54.3 (épinglé) × end-4/dots-hyprland 2026.05.11 « Pre-Hyprland Luaification »**
+**EndeavourOS × Hyprland des dépôts Arch (configuration Lua) × end-4/dots-hyprland (main, commit `21733c3` du 2026-11-15)**
+
+> **Version 3.0.0 — changement d’architecture.** Les versions 2.x figeaient Hyprland 0.54.3 (mars 2026). Sur la machine cible, à jour en novembre 2026, cette version plantait dès le démarrage (`std::logic_error` dans aquamarine, retour à l’écran de connexion), même avec une configuration vide et après recompilation. La 3.0 installe donc Hyprland **des dépôts Arch**, testé par Arch avec les pilotes actuels, et la branche `main` d’end-4 (configuration **Lua**), épinglée à un commit précis. Les raccourcis d’end-4 sont conservés et adaptés à l’AZERTY dans `~/.config/hypr/custom/keybinds.lua` : bureaux par touches physiques, Super+Alt/Maj + touche du chiffre, conflits des touches 4 et 6 corrigés, aide sur Super+!, émojis sur Super+:. Une installation 2.x est migrée automatiquement : IgnorePkg, hook, paquets recompilés et ancienne configuration hyprlang sont retirés ou mis de côté. Les sections ci-dessous qui décrivent la pile 0.54.3 épinglée concernent les versions 2.x.
 Cible : AMD Ryzen 5 4500 · Radeon RX 550 · 32 Go · clavier AZERTY français · dual boot Windows.
 
 ```bash

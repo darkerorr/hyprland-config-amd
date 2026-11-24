@@ -115,24 +115,6 @@ fi
 [[ $LAST_CAUSE == *songrec* ]] || fail "missing dependency not reported as cause: $LAST_CAUSE"
 pass "missing AUR dependency is rejected and reported"
 
-# makepkg ne doit jamais tirer un paquet Hyprland non épinglé des dépôts.
-cat >"$TEST_DIR/srcinfo" <<'SRC'
-pkgbase = fixture
-    depends = hyprland>=0.54.3
-SRC
-if check_aur_dependencies "$TEST_DIR/pkg" fixture; then
-  fail "unpinned Hyprland repository dependency was accepted"
-fi
-pass "unpinned Hyprland dependency is rejected"
-
-# Même installé, un paquet épinglé doit satisfaire la contrainte de version.
-pkg_installed() { [[ $1 == hyprland ]]; }
-pkg_version() { printf '%s' '0.50.0-1'; }
-if check_aur_dependencies "$TEST_DIR/pkg" fixture; then
-  fail "incompatible installed Hyprland version was accepted"
-fi
-pass "installed pinned package version is checked"
-
 cat >"$TEST_DIR/srcinfo" <<'SRC'
 pkgbase = fixture
     depends = package-not-in-repo
@@ -162,22 +144,6 @@ fi
 MOCK_PROVIDED=" glibc otf-space-grotesk "
 check_aur_dependencies "$TEST_DIR/pkg" fixture || fail "otf-space-grotesk provided by local package was not recognized"
 pass "otf-space-grotesk is resolved through the local provider package"
-
-# --- Dépendants inverses -------------------------------------------------------
-package_requires_incompatible_pin dependent-too-new || fail "newer Hyprland constraint was missed"
-pass "incompatible reverse dependency detected"
-if package_requires_incompatible_pin dependent-compatible; then
-  fail "compatible Hyprland constraint was incorrectly rejected"
-fi
-pass "compatible reverse dependency preserved"
-if ! (
-  pkg_installed() { [[ $1 == hyprland ]]; }
-  pkg_version() { printf '%s' '0.56.0-1'; }
-  package_requires_incompatible_pin dependent-current-too-new
-); then
-  fail "currently installed incompatible version was missed"
-fi
-pass "current installed version is checked before system upgrade"
 
 # --- Analyse des sorties d'échec ----------------------------------------------
 cat >"$TEST_DIR/makepkg8.out" <<'OUT'
@@ -251,22 +217,6 @@ failure_record 3 8 "AUR wlogout : makepkg a échoué" "Paquet introuvable : scdo
 [[ $(failure_get 3 code) == 8 ]] || fail "failure code not recorded"
 [[ $(failure_get 3 cause) == *scdoc* ]] || fail "failure cause not recorded"
 pass "step failure is persisted with code and cause"
-
-# --- Garde-fou de dérive de la pile -------------------------------------------
-mkdir -p "$(dirname -- "$PINS_LOCK")"
-: >"$PINS_LOCK"
-MODE=repair
-PINS_RESTORED=0
-pkg_version() { printf '%s' '0.99-1'; }
-expected_pin_version() { printf '%s' '0.54.3-4'; }
-die() { return 42; }
-assert_pins_intact || fail "repair mode stopped before restoring the pinned stack"
-pass "repair mode defers pin-lock validation until restoration"
-PINS_RESTORED=1
-if assert_pins_intact; then
-  fail "pin drift was accepted after restoration"
-fi
-pass "pin drift is rejected after restoration"
 
 # --- --session-debug : recherche par dichotomie du fichier qui fait planter -----
 (

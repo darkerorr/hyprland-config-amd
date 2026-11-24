@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  HYPRLAND AUTOMATED INSTALLER — install.sh
-#  EndeavourOS × Hyprland 0.54.3 (épinglé) × end-4/dots-hyprland 2026.05.11
+#  EndeavourOS × Hyprland (dépôts Arch, configuration Lua) × end-4/dots-hyprland (main 2026-11-15)
 #  Cible : AMD Ryzen 5 4500 + Radeon RX 550, clavier AZERTY français.
 #
 #  Point d'entrée unique. Usage : ./install.sh [--help]
@@ -13,9 +13,9 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="2.1.1"
+readonly INSTALLER_VERSION="3.0.0"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
-readonly CHECKPOINT_SCHEMA=3
+readonly CHECKPOINT_SCHEMA=4
 readonly MAIN_PID=$$
 SCRIPT_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_SELF
@@ -25,18 +25,21 @@ readonly SCRIPT_SELF
 # =============================================================================
 # --- end-4 / illogical-impulse ---------------------------------------------
 readonly END4_REPO="https://github.com/end-4/dots-hyprland.git"
-readonly END4_TAG="2026.05.11"                                   # "Pre-Hyprland Luaification"
-readonly END4_COMMIT="bebf66da89cd2afa4738da47fb3a0a9fa5af7035"  # tag léger -> ce commit (vérifié)
+# 3.0 : la release 2026.05.11 (Hyprland 0.54, hyprlang) ne fonctionnait pas sur un
+# système de novembre 2026 (plantage de Hyprland 0.54.3 au démarrage, Quickshell
+# incompatible Qt 6.12). On suit désormais Hyprland des dépôts Arch et la
+# branche main d'end-4 (configuration Lua), épinglée à un commit précis.
+readonly END4_TAG="main-2026-11-15"                               # libellé (pas de tag plus récent que 2026.05.11)
+readonly END4_COMMIT="21733c3ca7f4edc20faafedea844dc96002c6f7f"   # branche main, 2026-11-15
 readonly END4_SHAPES_COMMIT="e31ec4cb4ebf6a46b267f5c42eabf6874916fa16" # sous-module rounded-polygon-qmljs
 # --- Quickshell (épinglé par end-4 dans illogical-impulse-quickshell-git) ----
-readonly QS_COMMIT="7511545ee20664e3b8b8d3322c0ffe7567c56f7a"
+readonly QS_COMMIT="4f508be500dea6e5732cc3d50382a0048b17e7b1"   # v0.3.2, épinglé par end-4 main
 # Qt 6.12 a cassé la compilation du commit épinglé par end-4 (constaté sur la
 # machine cible : échec dans src/wayland/hyprland/ipc). Le correctif amont est
 # 5d5d498 « all: use MOC includes … Fixes linking issues and Qt 6.12
 # compatibility » (2026-08-26), absent de 7511545 et de v0.3.0/v0.3.1.
 readonly QS_QT_FIX_MIN="6.12"            # Qt à partir duquel le commit épinglé ne compile plus
 readonly -a QS_FALLBACKS=(
-  "4f508be500dea6e5732cc3d50382a0048b17e7b1|v0.3.2"              # 1re release contenant le correctif Qt 6.12
   "9b0f339b19057f4731bf3b48293307d7ef241671|master 2026-10-17"   # + 1c1cc91 (types MOC qualifiés)
 )
 readonly QS_MIRROR_URL="https://github.com/quickshell-mirror/quickshell.git"
@@ -49,11 +52,18 @@ readonly SNAPSHOT_DATE="2026-05-08"
 readonly ALA_URL="https://archive.archlinux.org/packages"
 readonly ARCH_PKG_GIT="https://gitlab.archlinux.org/archlinux/packaging/packages"
 # Ordre = ordre de dépendance (utilisé pour les reconstructions).
-readonly -a PIN_ORDER=(
+# 3.0 : plus aucune version épinglée — PIN_ORDER est vide (les fonctions de la
+# pile épinglée deviennent sans effet). LEGACY_PIN_PKGS sert uniquement à
+# remplacer, sur une installation 2.x, les versions épinglées/recompilées par
+# celles des dépôts.
+readonly -a PIN_ORDER=()
+readonly -a LEGACY_PIN_PKGS=(
   hyprutils hyprlang hyprwayland-scanner hyprwire hyprgraphics hyprcursor
   aquamarine hyprtoolkit hyprland-guiutils hyprland hypridle hyprlock
   hyprpicker hyprsunset xdg-desktop-portal-hyprland
 )
+# Paquets Hyprland installés depuis les dépôts (bibliothèques tirées en dépendances).
+readonly -a HYPR_PKGS=(hyprland hypridle hyprlock hyprpicker hyprsunset xdg-desktop-portal-hyprland hyprland-guiutils)
 declare -Ar PIN_VER=(
   [hyprutils]=0.13.1-1            [hyprlang]=0.6.8-4
   [hyprwayland-scanner]=0.4.6-1   [hyprwire]=0.3.1-2
@@ -533,7 +543,7 @@ handle_failure() {
 # réussit. Le script lui-même n'entre pas dans la clé (une correction du script
 # ne doit pas tout relancer) ; la vérification réelle protège contre la dérive.
 checkpoint_key() {
-  printf '%s|%s|%s|%s' "$CHECKPOINT_SCHEMA" "$END4_COMMIT" "$QS_COMMIT" "${PIN_VER[hyprland]}" \
+  printf '%s|%s|%s' "$CHECKPOINT_SCHEMA" "$END4_COMMIT" "$QS_COMMIT" \
     | sha256sum | cut -c1-16
 }
 checkpoint_done() { [[ -f $STATE_DIR/step-$1.done && "$(<"$STATE_DIR/step-$1.done")" == "$(checkpoint_key)" ]]; }
@@ -992,25 +1002,17 @@ check_pacman_lock() {
 }
 
 resolve_versions() {
-  # Vérification d'identité de la release end-4 directement sur GitHub.
-  local remote="" lsr
-  lsr=$(git ls-remote "$END4_REPO" "refs/tags/$END4_TAG" "refs/tags/$END4_TAG^{}" 2>&1) \
+  # end-4 : la branche main doit être joignable ; le commit épinglé est vérifié
+  # au clonage (étape 6). Aucun tag plus récent que 2026.05.11 n'existe.
+  local lsr
+  lsr=$(git ls-remote "$END4_REPO" refs/heads/main 2>&1) \
     || die "Impossible d’interroger $END4_REPO (git ls-remote) : $(tail -n1 <<<"$lsr")"
-  remote=$(awk '{print $1}' <<<"$lsr" | tail -n1)
-  [[ $remote == "$END4_COMMIT" ]] || die "Le tag end-4 $END4_TAG pointe sur '${remote:-?}', attendu $END4_COMMIT. Arrêt (release modifiée ?)."
-  ok "end-4 $END4_TAG -> ${END4_COMMIT:0:12} (vérifié sur GitHub)"
-  # Disponibilité des paquets épinglés dans l'Arch Linux Archive.
-  local n url
-  for n in "${PIN_ORDER[@]}"; do
-    [[ ${PIN_MODE[$n]} == src ]] && continue
-    url="$ALA_URL/${n:0:1}/$n/$n-${PIN_VER[$n]}-x86_64.pkg.tar.zst"
-    url_exists "$url" || die "Paquet épinglé indisponible dans l’Arch Linux Archive : $url (${NET_LAST_ERROR:-?})"
-  done
-  ok "Pile Hyprland épinglée disponible dans l’Arch Linux Archive (${#PIN_ORDER[@]} paquets)"
-  local repo_hypr qt
+  ok "end-4 joignable — commit épinglé ${END4_COMMIT:0:12} (main, 2026-11-15)"
+  local repo_hypr qt n
   repo_hypr=$(LC_ALL=C pacman -Si hyprland 2>/dev/null | awk -F': ' '/^Version/{print $2; exit}' | xargs || true)
   qt=$(LC_ALL=C pacman -Si qt6-base 2>/dev/null | awk -F': ' '/^Version/{print $2; exit}' | xargs || true)
-  info "Dépôts Arch actuels : hyprland ${repo_hypr:-?} (non utilisé), qt6-base ${qt:-?}"
+  [[ -n $repo_hypr ]] || die "Le paquet hyprland est introuvable dans les dépôts (pacman -Sy nécessaire ?)."
+  ok "Hyprland des dépôts Arch : ${repo_hypr} (qt6-base ${qt:-?})"
   mkdir -p "$MANIFEST_DIR"
   {
     printf '+-----------------------------------------------------------------+\n'
@@ -1019,9 +1021,7 @@ resolve_versions() {
     printf '| %-28s : %-32s |\n' "EndeavourOS" "$OS_NAME"
     printf '| %-28s : %-32s |\n' "end-4 dots-hyprland" "$END4_TAG (${END4_COMMIT:0:12})"
     printf '| %-28s : %-32s |\n' "Quickshell (épinglé end-4)" "${QS_COMMIT:0:12}"
-    printf '| %-28s : %-32s |\n' "Instantané Arch hypr*" "$SNAPSHOT_DATE"
-    for n in "${PIN_ORDER[@]}"; do printf '| %-28s : %-32s |\n' "$n" "${PIN_VER[$n]} [${PIN_MODE[$n]}]"; done
-    printf '| %-28s : %-32s |\n' "hyprland (dépôts, ignoré)" "${repo_hypr:-?}"
+    printf '| %-28s : %-32s |\n' "hyprland (dépôts Arch)" "${repo_hypr:-?}"
     printf '| %-28s : %-32s |\n' "qt6-base (dépôts)" "${qt:-?}"
     printf '+-----------------------------------------------------------------+\n'
   } >"$MANIFEST_DIR/versions-$RUN_TS.txt"
@@ -1033,12 +1033,12 @@ confirm_plan() {
   ui ""
   ui "  ${C_B}Résumé avant modification du système${C_RST}"
   ui "   • Mise à jour complète du système (pacman -Syu), puis installation des dépendances end-4."
-  ui "   • Hyprland ${PIN_VER[hyprland]} et sa pile épinglée (instantané Arch $SNAPSHOT_DATE) ;"
-  ui "     ajout d’une ligne IgnorePkg dans /etc/pacman.conf (sauvegardé) pour les conserver."
+  ui "   • Hyprland des dépôts Arch (à jour, configuration Lua) ; une ancienne pile figée"
+  ui "     (versions 2.x : IgnorePkg, paquets recompilés) est retirée et remplacée."
   ui "   • end-4 $END4_TAG (${END4_COMMIT:0:12}) déployé dans ~/.config (sauvegarde horodatée)."
-  ui "   • AZERTY (fr), raccourcis AZERTY, services, gestionnaire de connexion."
+  ui "   • AZERTY (fr), raccourcis end-4 adaptés à l’AZERTY, services, gestionnaire de connexion."
   ui "   • Aucune opération sur les disques, partitions, EFI, chargeur de démarrage ou Windows."
-  [[ -n $EXISTING_HYPR && $EXISTING_HYPR != "$(expected_pin_version hyprland)" ]] && ui "   • ${C_YEL}Hyprland $EXISTING_HYPR installé sera remplacé par ${PIN_VER[hyprland]}.${C_RST}"
+  [[ -n $EXISTING_HYPR ]] && ui "   • ${C_YEL}Hyprland $EXISTING_HYPR installé sera mis à jour vers la version des dépôts.${C_RST}"
   if ! ask_yes_no "Lancer l’installation ?"; then
     ui "  Annulé par l’utilisateur. Aucune modification effectuée."
     FAILURE_HANDLED=1; exit 1
@@ -1203,15 +1203,16 @@ ensure_ignorepkg() {
 install_system_packages() {
   # Dépendants incompatibles d'abord (ils bloqueraient la transaction).
   remove_incompatible_dependents
-  # IgnorePkg AVANT -Syu seulement si la pile épinglée est déjà en place : sinon,
-  # ignorer un Hyprland de dépôt plus récent bloquerait la mise à jour de ses
-  # dépendances (mise à jour partielle) alors qu'il sera remplacé à l'étape 5.
-  if pinned_stack_installed; then ensure_ignorepkg; fi
+  # 3.0 : plus de versions figées. L'ancien IgnorePkg est retiré AVANT -Syu, et
+  # les paquets Hyprland déjà installés sont mis à jour dans la MÊME transaction
+  # (sinon un Hyprland 0.54 restant bloquerait la mise à jour de ses bibliothèques).
+  remove_legacy_pinning
   local -a keyring_pkgs=(archlinux-keyring)
   pkg_installed endeavouros-keyring && keyring_pkgs+=(endeavouros-keyring)
   pacman_tx "Mise à jour des trousseaux de clés" sudo pacman -Sy --needed --noconfirm "${keyring_pkgs[@]}"
-  system_upgrade
-  ensure_ignorepkg
+  local -a hypr_installed=() n
+  for n in "${LEGACY_PIN_PKGS[@]}"; do pkg_installed "$n" && hypr_installed+=("$n"); done
+  system_upgrade "${hypr_installed[@]}"
   # PulseAudio est remplacé par PipeWire (conflit avec pipewire-pulse).
   if pkg_installed pulseaudio; then remove_conflict pulseaudio pipewire-pulse; fi
   if pkg_installed pulseaudio-bluetooth; then remove_conflict pulseaudio-bluetooth pipewire-pulse; fi
@@ -1229,11 +1230,12 @@ install_system_packages() {
 # la pile épinglée lié à une ancienne version d'une bibliothèque que la mise à
 # jour remplace. Il est alors retiré (après accord) puis recompilé à l'étape 5
 # contre la nouvelle bibliothèque.
-system_upgrade() {
+system_upgrade() {   # system_upgrade [paquets à (ré)installer depuis les dépôts dans la même transaction]
   local attempt v
+  local -a extra=("$@")
   local -a blockers=() pinned=() other=()
   for attempt in 1 2 3; do
-    if spin "Mise à jour complète du système (pacman -Syu)" sudo pacman -Syu --noconfirm; then
+    if spin "Mise à jour complète du système (pacman -Syu)" sudo pacman -Syu --noconfirm "${extra[@]}"; then
       assert_pins_intact; return 0
     fi
     mapfile -t blockers < <(pacman_blockers "$SPIN_OUTPUT_FILE")
@@ -1384,7 +1386,7 @@ install_graphics() {
 }
 
 # =============================================================================
-# 9. ÉTAPE 05 — PILE HYPRLAND 0.54.3 ÉPINGLÉE
+# 9. ÉTAPE 05 — HYPRLAND (dépôts Arch) ; anciens éléments de la pile épinglée 2.x
 # =============================================================================
 ala_fetch() {   # télécharge + vérifie séparément l'archive et sa signature
   local n=$1 fn url dest
@@ -1558,144 +1560,80 @@ package_requires_incompatible_pin() {
 }
 
 remove_incompatible_dependents() {
-  local -a deps=() d n
-  for n in "${PIN_ORDER[@]}"; do
+  # Agent polkit redondant : Quickshell (end-4) fournit le sien.
+  if pkg_installed hyprpolkitagent; then remove_conflict hyprpolkitagent "end-4 (agent polkit intégré à Quickshell)"; fi
+  return 0
+}
+
+# Retire tout ce que les versions 2.x ont mis en place pour figer Hyprland 0.54.3
+# (IgnorePkg, hook pacman, verrou, chroot de compilation). Idempotent.
+remove_legacy_pinning() {
+  local tmp
+  if grep -qF '# hypr-installer: pile Hyprland' "$PACMAN_CONF" 2>/dev/null; then
+    backup_path "$PACMAN_CONF"
+    tmp="$TMP_DIR/pacman.conf"
+    awk '/^# hypr-installer: pile Hyprland/ {skip=1; next} skip==1 && /^IgnorePkg[[:space:]]*=/ {skip=0; next} {skip=0; print}' "$PACMAN_CONF" >"$tmp"
+    sudo install -m 644 "$tmp" "$PACMAN_CONF"
+    ! grep -qF '# hypr-installer: pile Hyprland' "$PACMAN_CONF" || die "Impossible de retirer l’ancien IgnorePkg de $PACMAN_CONF."
+    ok "Ancien blocage des versions Hyprland (IgnorePkg) retiré de pacman.conf"
+  fi
+  if [[ -e $HOOK_FILE || -e $HOOK_SCRIPT ]]; then
+    sudo rm -f -- "$HOOK_FILE" "$HOOK_SCRIPT"
+    ok "Ancien hook pacman de surveillance retiré"
+  fi
+  rm -f -- "$PINS_LOCK" "$STATE_DIR/pins.force-src" "$STATE_DIR/aquamarine.fallback" "$STATE_DIR/chroot.ready" "$STATE_DIR/chroot.prepared-run"
+  if [[ -d $CHROOT_DIR && $CHROOT_DIR == "$CACHE_DIR/chroot" ]]; then
+    sudo rm -rf --one-file-system -- "${CHROOT_DIR:?}" 2>/dev/null || warn "Ancien chroot de compilation non supprimé : $CHROOT_DIR"
+  fi
+  rm -rf -- "${PKG_CACHE:?}/built" "${BUILD_DIR:?}/arch"
+  return 0
+}
+
+# Paquets installés qui viennent d'une version 2.x (épinglée ou recompilée
+# localement) et doivent être remplacés par la version des dépôts.
+legacy_hypr_packages() {
+  local n v repo
+  for n in "${LEGACY_PIN_PKGS[@]}"; do
     pkg_installed "$n" || continue
-    for d in $(LC_ALL=C pacman -Qi "$n" | awk -F': ' '/^Required By/{print $2}'); do
-      [[ $d == None ]] && continue
-      is_pinned "$d" && continue
-      deps+=("$d")
-    done
+    v=$(pkg_version "$n")
+    repo=$(LC_ALL=C pacman -Si "$n" 2>/dev/null | awk -F': ' '/^Version/{print $2; exit}' | xargs || true)
+    [[ -n $repo && $v != "$repo" ]] && printf '%s\n' "$n"
   done
-  mapfile -t deps < <(printf '%s\n' "${deps[@]}" | sort -u | grep -v '^$' || true)
-  (("${#deps[@]}")) || return 0
-  for d in "${deps[@]}"; do
-    case $d in
-      hyprpolkitagent|hyprland-qt-support|hyprpaper|hyprland-qtutils|quickshell|hyprshutdown)
-        remove_conflict "$d" "pile Hyprland 0.54.3 (redondant avec end-4 / incompatible)";;
-      *)
-        if package_requires_incompatible_pin "$d"; then
-          remove_conflict "$d" "contrainte de version incompatible avec la pile Hyprland épinglée"
-        else
-          log "« $d » dépend d’un paquet Hyprland sans contrainte de version incompatible : conservé."
-        fi;;
-    esac
-  done
+  return 0
 }
 
 install_hyprland() {
-  pac_install devtools base-devel git
-  ensure_ignorepkg
-  local n f
-  local -A file=()
-  # Paquets à recompiler : mode « src », ABI cassée (réparation), ou retirés à
-  # l'étape 3 parce qu'ils bloquaient la mise à jour (pins.force-src).
-  local -a broken=() forced=()
-  if [[ $MODE == repair ]]; then mapfile -t broken < <(pin_broken_list); fi
-  mapfile -t forced < <(state_get pins.force-src | grep -v '^$' || true)
-  # 1) binaires officiels vérifiés
-  for n in "${PIN_ORDER[@]}"; do
-    [[ ${PIN_MODE[$n]} == bin ]] || continue
-    f=$(ala_fetch "$n"); file[$n]=$f
-  done
-  ok "Paquets archivés vérifiés (SHA-256 + signature Arch)"
-  # 2) reconstructions en chroot propre (dans l'ordre des dépendances)
-  for n in "${PIN_ORDER[@]}"; do
-    local need_src=0 cached="" rebuild=0
-    [[ ${PIN_MODE[$n]} == src || ${PIN_MODE[$n]} == srcpref ]] && need_src=1
-    [[ " ${broken[*]} " == *" $n "* ]] && { need_src=1; rebuild=1; }
-    [[ " ${forced[*]} " == *" $n "* ]] && { need_src=1; rebuild=1; }
-    ((need_src)) || continue
-    cached=$(find_built_pkg "$PKG_CACHE/built" "$n" "${PIN_VER[$n]}${LOCAL_REL_SUFFIX}" || true)
-    if [[ -n $cached && $MODE != repair && $rebuild == 0 ]]; then file[$n]=$cached; log "Reconstruction en cache : $cached"; continue; fi
-    [[ -n $(state_get chroot.prepared-run) && $(state_get chroot.prepared-run) == "$RUN_TS" ]] || { prepare_chroot; state_set chroot.prepared-run "$RUN_TS"; }
-    local -a inj=() m
-    for m in "${PIN_ORDER[@]}"; do [[ $m == "$n" ]] && break; [[ -n ${file[$m]:-} ]] && inj+=("${file[$m]}"); done
-    if f=$(build_pin_src "$n" "${inj[@]}"); then
-      file[$n]=$f
-      [[ $n == aquamarine ]] && rm -f -- "$STATE_DIR/aquamarine.fallback"
-    elif [[ ${PIN_MODE[$n]} != src ]]; then
-      # Compilation impossible : repli sur le binaire archivé vérifié, jamais d'arrêt.
-      LAST_CAUSE=$(explain_failure_output "$SPIN_OUTPUT_FILE" | head -n1)
-      rm -f -- "$TMP_DIR/last-error"
-      warn "$n : recompilation impossible (${LAST_CAUSE:-voir journal}) ; binaire archivé vérifié utilisé à la place."
-      f=$(ala_fetch "$n"); file[$n]=$f
-      [[ $n == aquamarine ]] && state_set aquamarine.fallback 1
-    else
-      die "$n : compilation impossible et aucun binaire archivé compatible. ${LAST_CAUSE:-Voir journal.}"
-    fi
-  done
-  # 3) une seule transaction pour toute la pile (cohérence ABI)
+  remove_legacy_pinning
   remove_incompatible_dependents
-  local -a all=()
-  for n in "${PIN_ORDER[@]}"; do
-    [[ -n ${file[$n]:-} && -f ${file[$n]} ]] || die "Erreur interne : paquet de $n non préparé."
-    all+=("${file[$n]}")
-  done
-  PINS_RESTORED=0   # le verrou est réécrit juste après cette transaction
-  install_pkgfiles "${all[@]}"
-  # 4) verrou des versions effectivement installées + contrôles
-  for n in "${PIN_ORDER[@]}"; do
-    local v; v=$(pkg_version "$n")
-    [[ $v == "${PIN_VER[$n]}" || $v == "${PIN_VER[$n]}${LOCAL_REL_SUFFIX}" ]] || die "$n : version installée « ${v:-absente} » inattendue"
-  done
-  : >"$PINS_LOCK.tmp"
-  for n in "${PIN_ORDER[@]}"; do printf '%s %s\n' "$n" "$(pkg_version "$n")" >>"$PINS_LOCK.tmp"; done
-  mv -f "$PINS_LOCK.tmp" "$PINS_LOCK"
-  PINS_RESTORED=1
-  contains '0\.54\.3' "$(Hyprland --version 2>/dev/null || true)" || die "Hyprland --version ne rapporte pas 0.54.3"
-  mapfile -t broken < <(pin_broken_list)
-  ((${#broken[@]} == 0)) || die "Bibliothèques manquantes pour : ${broken[*]} (voir journal). Lancez ./install.sh --repair."
-  rm -f -- "$STATE_DIR/pins.force-src"
-  ok "Hyprland $(Hyprland --version 2>/dev/null | head -1 | awk '{print $2}') installé, ABI cohérente"
-  install_pin_hook
+  local -a legacy=() libs=() apps=() n
+  mapfile -t legacy < <(legacy_hypr_packages)
+  if ((${#legacy[@]})); then
+    for n in "${legacy[@]}"; do
+      if [[ " ${HYPR_PKGS[*]} " == *" $n "* ]]; then apps+=("$n"); else libs+=("$n"); fi
+    done
+    info "Remplacement des versions 2.x par celles des dépôts : ${legacy[*]}"
+    # Une seule transaction : bibliothèques et applications restent cohérentes.
+    ((${#apps[@]})) && pacman_tx "Hyprland : versions des dépôts" sudo pacman -S --noconfirm "${apps[@]}"
+    ((${#libs[@]})) && pacman_tx "Bibliothèques Hyprland : versions des dépôts" sudo pacman -S --noconfirm --asdeps "${libs[@]}"
+  fi
+  pac_install "${HYPR_PKGS[@]}"
+  local -a still=()
+  mapfile -t still < <(legacy_hypr_packages)
+  ((${#still[@]} == 0)) || die "Versions locales encore installées (attendu : dépôts) : ${still[*]}"
+  local hv; hv=$(Hyprland --version 2>/dev/null | head -n1 || true)
+  [[ -n $hv ]] || die "Hyprland --version ne répond pas après installation."
+  local broken=""
+  for n in "${LEGACY_PIN_PKGS[@]}"; do pkg_installed "$n" && pkg_has_broken_libs "$n" && broken+="$n "; done
+  [[ -z $broken ]] || die "Bibliothèques manquantes pour : $broken(mise à jour système incomplète ?)."
+  ok "Hyprland des dépôts Arch installé : $(awk '{print $2}' <<<"$hv") (configuration Lua)"
 }
 
-install_pin_hook() {
-  local list="${PIN_ORDER[*]}"
-  sudo_write "$HOOK_SCRIPT" 755 <<EOF
-#!/usr/bin/env bash
-# MANAGED-BY: hypr-installer — vérifie la pile Hyprland épinglée après chaque transaction pacman.
-pins=($list)
-bad=()
-for n in "\${pins[@]}"; do
-  pacman -Qq "\$n" &>/dev/null || { bad+=("\$n (désinstallé)"); continue; }
-  while IFS= read -r f; do
-    [[ -f \$f && ! -L \$f && ( \$f == /usr/bin/* || \$f == /usr/lib/* ) ]] || continue
-    [[ "\$(od -An -tx1 -N4 "\$f" 2>/dev/null | tr -d ' ')" == 7f454c46 ]] || continue
-    if [[ "\$(LC_ALL=C ldd "\$f" 2>/dev/null)" == *'not found'* ]]; then bad+=("\$n (bibliothèque manquante)"); break; fi
-  done < <(pacman -Qlq "\$n")
-done
-if ((\${#bad[@]})); then
-  echo "==> ATTENTION (hypr-installer) : la pile Hyprland 0.54.3 est cassée par cette mise à jour :"
-  printf '      - %s\n' "\${bad[@]}"
-  echo "    Réparez AVANT de redémarrer : ~/.local/share/hypr-installer/bin/install.sh --repair"
-fi
-exit 0
-EOF
-  sudo_write "$HOOK_FILE" 644 <<EOF
-# MANAGED-BY: hypr-installer
-[Trigger]
-Operation = Install
-Operation = Upgrade
-Operation = Remove
-Type = Package
-Target = *
-
-[Action]
-Description = Vérification de la pile Hyprland 0.54.3 épinglée (hypr-installer)...
-When = PostTransaction
-Exec = $HOOK_SCRIPT
-EOF
-  ok "Hook pacman de surveillance ABI installé"
-}
 
 # =============================================================================
 # 10. ÉTAPE 06 — END-4 (release 2026.05.11)
 # =============================================================================
 fetch_end4() {
   git_checkout_pinned "$END4_REPO" "$END4_DIR" "$END4_COMMIT"
-  [[ "$(git -C "$END4_DIR" rev-parse "$END4_TAG^{commit}" 2>/dev/null)" == "$END4_COMMIT" ]] || die "Le tag local $END4_TAG ne correspond pas à $END4_COMMIT"
   spin "Sous-module rounded-polygon-qmljs" git -C "$END4_DIR" submodule update --init --recursive
   [[ "$(git -C "$END4_DIR/dots/.config/quickshell/ii/modules/common/widgets/shapes" rev-parse HEAD)" == "$END4_SHAPES_COMMIT" ]] \
     || die "Sous-module shapes inattendu"
@@ -1896,14 +1834,27 @@ deploy_end4_files() {
   # dernier niveau de dossier (cause du code 11 « mkdir failed » en 2.0.2).
   sync_tree "$src/.config/hypr/hyprland/" "$CFG/hypr/hyprland/" --delete
   sync_tree "$src/.config/hypr/hyprlock/" "$CFG/hypr/hyprlock/" --delete
-  for f in hyprlock.conf monitors.conf workspaces.conf hypridle.conf; do
+  for f in hyprlock.conf hypridle.conf; do
     if [[ -f $CFG/hypr/$f ]] && ! cmp -s "$src/.config/hypr/$f" "$CFG/hypr/$f"; then
       if ((firstrun)); then mv -f "$CFG/hypr/$f" "$CFG/hypr/$f.old"; cp -f "$src/.config/hypr/$f" "$CFG/hypr/$f"
       else cp -f "$src/.config/hypr/$f" "$CFG/hypr/$f.new"; fi
     else cp -f "$src/.config/hypr/$f" "$CFG/hypr/$f"; fi
   done
-  cp -f "$src/.config/hypr/hyprland.conf" "$CFG/hypr/hyprland.conf"
-  [[ -d $HYPR_CUSTOM ]] || sync_tree "$src/.config/hypr/custom/" "$HYPR_CUSTOM/"
+  cp -f "$src/.config/hypr/hyprland.lua" "$CFG/hypr/hyprland.lua"
+  # Ancienne configuration hyprlang (versions 2.x, Hyprland ≤ 0.54) : ignorée par
+  # Hyprland ≥ 0.55 ; sauvegardée par backup_existing_config puis retirée.
+  local old
+  for old in hyprland.conf monitors.conf workspaces.conf; do
+    [[ -f $CFG/hypr/$old ]] && mv -f -- "$CFG/hypr/$old" "$CFG/hypr/$old.hyprlang-old"
+  done
+  for old in "$HYPR_CUSTOM"/*.conf; do
+    grep -qF "$MANAGED_MARK" "$old" 2>/dev/null && rm -f -- "$old"
+  done
+  # Fichiers personnels end-4 (custom/*.lua) : créés s'ils manquent, jamais écrasés.
+  mkdir -p "$HYPR_CUSTOM"
+  for f in "$src"/.config/hypr/custom/*; do
+    [[ -e $HYPR_CUSTOM/$(basename "$f") ]] || cp -a -- "$f" "$HYPR_CUSTOM/"
+  done
   install -Dm644 "$src/.local/share/icons/illogical-impulse.svg" "${XDG_DATA_HOME:-$HOME/.local/share}/icons/illogical-impulse.svg"
   mkdir -p "$CFG/illogical-impulse"
   touch "$CFG/illogical-impulse/installed_true"
@@ -1949,7 +1900,7 @@ end4_setups() {   # équivalent de sdata/subcmd-install/2.setups.sh (Arch)
 
 install_end4() {
   fetch_end4
-  pac_install hyprshot   # dépend de hyprland : seulement après la pile épinglée
+  pac_install hyprshot
   install_end4_metas
   backup_existing_config
   install_google_sans_flex
@@ -1958,7 +1909,7 @@ install_end4() {
   end4_setups
   # Original des raccourcis end-4 conservé pour référence.
   mkdir -p "$MANIFEST_DIR"
-  cp -f "$END4_DIR/dots/.config/hypr/hyprland/keybinds.conf" "$MANIFEST_DIR/end4-keybinds.upstream.conf"
+  cp -f "$END4_DIR/dots/.config/hypr/hyprland/keybinds.lua" "$MANIFEST_DIR/end4-keybinds.upstream.lua"
 }
 
 # =============================================================================
@@ -1984,13 +1935,8 @@ install_quickshell() {
   cp -a "$END4_DIR/sdata/dist-arch/illogical-impulse-quickshell-git/." "$qcheck/"
   check_aur_dependencies "$qcheck" "illogical-impulse-quickshell-git" || die "Quickshell : dépendances de compilation non résolues (liste ci-dessus)."
   qt=$(pkg_version qt6-base); qt=${qt#*:}
-  # Candidats, du plus proche de la release end-4 au plus récent.
-  local -a candidates=()
-  if [[ -n $qt ]] && (( $(vercmp "${qt%%-*}" "$QS_QT_FIX_MIN") >= 0 )); then
-    info "Qt ${qt%%-*} : le commit Quickshell épinglé par end-4 (${QS_COMMIT:0:12}) ne compile plus avec Qt ≥ $QS_QT_FIX_MIN ; utilisation directe d’une version corrigée."
-  else
-    candidates+=("$QS_COMMIT|épinglé par end-4")
-  fi
+  # Candidats : commit épinglé par end-4 (v0.3.2, compatible Qt 6.12), puis plus récent.
+  local -a candidates=("$QS_COMMIT|épinglé par end-4")
   candidates+=("${QS_FALLBACKS[@]}")
   for entry in "${candidates[@]}"; do
     commit=${entry%%|*}; label=${entry#*|}
@@ -2024,30 +1970,27 @@ install_quickshell() {
 # 12. ÉTAPE 08 — CLAVIER AZERTY
 # =============================================================================
 configure_keyboard() {
-  write_managed "$HYPR_CUSTOM/general.conf" <<EOF
-# hyprlang noerror false
-$MANAGED_MARK — clavier AZERTY + réglages RX 550
-# Vos réglages personnels : ~/.config/hypr/custom/general.user.conf (jamais écrasé)
+  write_managed "$HYPR_CUSTOM/general.lua" <<EOF
+-- $MANAGED_MARK — clavier AZERTY + réglages RX 550
+-- Vos réglages personnels : ~/.config/hypr/custom/general_user.lua (jamais écrasé)
+hl.config({
+    input = {
+        kb_layout = "fr",
+        numlock_by_default = true,
+    },
+    -- RX 550 : flou allégé (end-4 utilise 3 passes) ; l'apparence reste celle d'end-4.
+    decoration = {
+        blur = {
+            passes = 2,
+        },
+    },
+})
 
-input {
-    kb_layout = fr
-    kb_variant =
-    kb_model = pc105
-    kb_options =
-    kb_rules =
-    numlock_by_default = true
-}
-
-# RX 550 : flou allégé (end-4 utilise 3 passes) — l'apparence reste celle d'end-4.
-decoration {
-    blur {
-        passes = 2
-    }
-}
-
-source = ~/.config/hypr/custom/general.user.conf
+if is_file_exists(HOME .. "/.config/hypr/custom/general_user.lua") then
+    require("custom.general_user")
+end
 EOF
-  [[ -f $HYPR_CUSTOM/general.user.conf ]] || printf '# Réglages personnels (sourcé après custom/general.conf)\n' >"$HYPR_CUSTOM/general.user.conf"
+  [[ -f $HYPR_CUSTOM/general_user.lua ]] || printf -- '-- Réglages personnels (chargé après custom/general.lua)\n' >"$HYPR_CUSTOM/general_user.lua"
   # Console (TTY) et X11 (écran de connexion SDDM/X11, applications XWayland).
   local vc x11
   vc=$(localectl status | awk -F': ' '/VC Keymap/{print $2}' | xargs)
@@ -2060,299 +2003,66 @@ EOF
     [[ -e $X11_KEYBOARD_CONF ]] && backup_path "$X11_KEYBOARD_CONF"
     sudo localectl set-x11-keymap --no-convert fr pc105
   fi
-  ok "AZERTY : Hyprland (kb_layout = fr), console ($(localectl status | awk -F': ' '/VC Keymap/{print $2}' | xargs)), X11/écran de connexion (fr)"
+  ok "AZERTY : Hyprland (kb_layout = \"fr\"), console ($(localectl status | awk -F': ' '/VC Keymap/{print $2}' | xargs)), X11/écran de connexion (fr)"
   containsi 'utf-8' "$(locale)" || warn "La locale système n’est pas UTF-8 : les caractères accentués peuvent mal s’afficher."
 }
 
 # =============================================================================
 # 13. ÉTAPE 09 — RACCOURCIS (pensés pour AZERTY)
 # =============================================================================
+# Hyprland ≥ 0.55 : configuration Lua. On garde les raccourcis d'end-4 (déjà
+# basés sur les codes physiques pour Super+1…0) et on corrige ce qui ne
+# fonctionne pas, ou fonctionne mal, sur un clavier AZERTY :
+#  - Super+Alt+chiffre et Super+Maj+chiffre : les chiffres demandent Maj en
+#    AZERTY -> liaisons par code physique (touches & é " ' ( - è _ ç à) ;
+#  - Super+- (touche 6) et Super+' (touche 4) déclenchaient À LA FOIS le bureau
+#    6/4 et le zoom / le ratio : retirés, déplacés sur des touches libres ;
+#  - Super+/ (aide) et Super+. (émojis) demandent Maj en AZERTY -> touches
+#    physiques équivalentes (! et :).
 configure_keybindings() {
-  local ws_go="" ws_move="" ws_silent="" kp_go="" kp_silent="" i code
-  local -a kp=(87 88 89 83 84 85 79 80 81 90)
-  for i in $(seq 1 10); do
-    code=$((9 + i))
-    ws_go+="bind = Super, code:$code, exec, ~/.config/hypr/hyprland/scripts/workspace_action.sh workspace $i # [hidden]"$'\n'
-    ws_move+="bind = Super+Shift, code:$code, exec, ~/.config/hypr/hyprland/scripts/workspace_action.sh movetoworkspace $i # [hidden]"$'\n'
-    ws_silent+="bind = Super+Alt, code:$code, exec, ~/.config/hypr/hyprland/scripts/workspace_action.sh movetoworkspacesilent $i # [hidden]"$'\n'
-    kp_go+="bindp = Super, code:${kp[i-1]}, exec, ~/.config/hypr/hyprland/scripts/workspace_action.sh workspace $i # [hidden]"$'\n'
-    kp_silent+="bind = Super+Alt, code:${kp[i-1]}, exec, ~/.config/hypr/hyprland/scripts/workspace_action.sh movetoworkspacesilent $i # [hidden]"$'\n'
-  done
+  write_managed "$HYPR_CUSTOM/keybinds.lua" <<EOF
+-- $MANAGED_MARK — adaptation AZERTY des raccourcis end-4
+-- Vos raccourcis personnels : ~/.config/hypr/custom/keybinds_user.lua (jamais écrasé)
 
-  write_managed "$HYPR_CUSTOM/variables.conf" <<EOF
-# hyprlang noerror false
-$MANAGED_MARK
-# Les raccourcis QWERTY par défaut d'end-4 sont remplacés par custom/keybinds.conf (AZERTY).
-\$dontLoadDefaultKeybinds = true
-\$calculator = ~/.config/hypr/hyprland/scripts/launch_first_available.sh "qalculate-qt" "gnome-calculator" "kcalc"
-\$screenshotHelper = ~/.config/hypr/custom/scripts/hypr-installer-screenshot.sh
+-- Bureaux : Super+Alt / Super+Maj + touche du chiffre (codes physiques 10 à 19)
+for i = 1, 10 do
+    hl.bind("SUPER + ALT + code:" .. (9 + i), function()
+        hl.dispatch(hl.dsp.window.move({ workspace = workspace_in_group(i), follow = false }))
+    end, { description = "Fenêtre : envoyer au bureau " .. i .. " (AZERTY)" })
+    hl.bind("SUPER + SHIFT + code:" .. (9 + i), function()
+        hl.dispatch(hl.dsp.window.move({ workspace = workspace_in_group(i) }))
+    end, { description = "Fenêtre : déplacer vers le bureau " .. i .. " (AZERTY)" })
+end
+
+-- Conflits AZERTY : « - » est sur la touche 6, « ' » sur la touche 4
+hl.unbind("SUPER + Minus")
+hl.unbind("SUPER + Apostrophe")
+hl.bind("SUPER + ugrave", hl.dsp.layout("splitratio +0.1"), { repeating = true, description = "Fenêtre : agrandir la part (touche ù)" })
+
+-- Symboles qui demandent Maj en AZERTY : touches physiques équivalentes
+hl.bind("SUPER + code:61", hl.dsp.global("quickshell:cheatsheetToggle"), { description = "Aide des raccourcis (touche !)" })
+hl.bind("SUPER + code:60", hl.dsp.global("quickshell:overviewEmojiToggle"), { description = "Émojis (touche :)" })
+hl.bind("CTRL + SUPER + code:51", hl.dsp.window.resize({ x = 640, y = 480, "exact" }))
+
+if is_file_exists(HOME .. "/.config/hypr/custom/keybinds_user.lua") then
+    require("custom.keybinds_user")
+end
 EOF
-
-  write_managed "$HYPR_CUSTOM/scripts/hypr-installer-screenshot.sh" <<'EOF'
-#!/usr/bin/env bash
-# MANAGED-BY: hypr-installer — captures d'écran (repli si Quickshell est indisponible)
-set -euo pipefail
-mode=${1:-full-clip}
-mon=$(hyprctl activeworkspace -j | jq -r '.monitor')
-dir="$(xdg-user-dir PICTURES)/Screenshots"
-file="$dir/Capture_$(date '+%Y-%m-%d_%H.%M.%S').png"
-case $mode in
-  full-clip)
-    grim -o "$mon" - | wl-copy --type image/png
-    notify-send -a "Capture d'écran" "Écran copié dans le presse-papiers" ;;
-  full-file)
-    mkdir -p "$dir"; grim -o "$mon" "$file"; wl-copy --type image/png <"$file"
-    notify-send -a "Capture d'écran" "Capture enregistrée" "$file" ;;
-  region-file)
-    pidof slurp >/dev/null && exit 0
-    geom=$(slurp) || exit 0
-    mkdir -p "$dir"; grim -g "$geom" "$file"; wl-copy --type image/png <"$file"
-    notify-send -a "Capture d'écran" "Zone enregistrée" "$file" ;;
-  ocr)
-    pidof slurp >/dev/null && exit 0
-    geom=$(slurp) || exit 0
-    grim -g "$geom" - | tesseract stdin stdout -l fra+eng 2>/dev/null | wl-copy
-    notify-send -a "OCR" "Texte copié dans le presse-papiers" ;;
-esac
-EOF
-  chmod +x "$HYPR_CUSTOM/scripts/hypr-installer-screenshot.sh"
-
-  write_managed "$HYPR_CUSTOM/keybinds.conf" <<EOF
-# hyprlang noerror false
-$MANAGED_MARK — raccourcis AZERTY français (Hyprland 0.54.3, end-4 2026.05.11)
-# Ce fichier est régénéré par install.sh. Vos raccourcis : custom/keybinds.user.conf
-# Lettres : liées par symbole (touche marquée sur le clavier AZERTY).
-# Rangée des chiffres : liée par code physique (code:10…19) -> Super+& … Super+à
-# fonctionnent sans Maj. Les touches /, ., [, ], -, ' (inaccessibles ou en conflit
-# avec la rangée des chiffres en AZERTY) ne sont jamais utilisées.
-
-# NE PAS RETIRER : nécessaire au catchall de Quickshell
-exec = hyprctl dispatch submap global
-submap = global
-
-#!
-##! Interface (Quickshell)
-bindid = Super, Super_L, Toggle search, global, quickshell:searchToggleRelease # Lanceur (appui court sur Super)
-bindid = Super, Super_R, Toggle search, global, quickshell:searchToggleRelease # [hidden]
-bind = Super, Super_L, exec, qs -c \$qsConfig ipc call TEST_ALIVE || pkill fuzzel || fuzzel # [hidden]
-bind = Super, Super_R, exec, qs -c \$qsConfig ipc call TEST_ALIVE || pkill fuzzel || fuzzel # [hidden]
-binditn = Super, catchall, global, quickshell:searchToggleReleaseInterrupt # [hidden]
-bind = Ctrl, Super_L, global, quickshell:searchToggleReleaseInterrupt # [hidden]
-bind = Ctrl, Super_R, global, quickshell:searchToggleReleaseInterrupt # [hidden]
-bind = Super, mouse:272, global, quickshell:searchToggleReleaseInterrupt # [hidden]
-bind = Super, mouse:273, global, quickshell:searchToggleReleaseInterrupt # [hidden]
-bind = Super, mouse:274, global, quickshell:searchToggleReleaseInterrupt # [hidden]
-bind = Super, mouse:275, global, quickshell:searchToggleReleaseInterrupt # [hidden]
-bind = Super, mouse:276, global, quickshell:searchToggleReleaseInterrupt # [hidden]
-bind = Super, mouse:277, global, quickshell:searchToggleReleaseInterrupt # [hidden]
-bind = Super, mouse_up, global, quickshell:searchToggleReleaseInterrupt # [hidden]
-bind = Super, mouse_down, global, quickshell:searchToggleReleaseInterrupt # [hidden]
-bindit = , Super_L, global, quickshell:workspaceNumber # [hidden]
-bindit = , Super_R, global, quickshell:workspaceNumber # [hidden]
-bind = Super, Space, global, quickshell:searchToggle # Lanceur d'applications
-bind = Super, Space, exec, qs -c \$qsConfig ipc call TEST_ALIVE || pkill fuzzel || fuzzel # [hidden]
-bind = Super, Tab, global, quickshell:overviewWorkspacesToggle # Vue d'ensemble des bureaux
-bind = Super, Escape, global, quickshell:sessionToggle # Menu système (verrouiller, déconnexion, arrêt)
-bind = Super, Escape, exec, qs -c \$qsConfig ipc call TEST_ALIVE || pkill wlogout || wlogout -p layer-shell # [hidden]
-bind = Ctrl+Alt, Delete, global, quickshell:sessionToggle # [hidden]
-bind = Ctrl+Alt, Delete, exec, qs -c \$qsConfig ipc call TEST_ALIVE || pkill wlogout || wlogout -p layer-shell # [hidden]
-bind = Super, F1, global, quickshell:cheatsheetToggle # Aide : liste des raccourcis
-bind = Super, A, global, quickshell:sidebarLeftToggle # Panneau gauche (IA, traduction)
-bind = Super+Alt, A, global, quickshell:sidebarLeftToggleDetach # [hidden]
-bind = Super, O, global, quickshell:sidebarLeftToggle # [hidden]
-bind = Super, N, global, quickshell:sidebarRightToggle # Panneau droit (notifications, réglages rapides)
-bind = Super+Shift, V, global, quickshell:overviewClipboardToggle # Historique du presse-papiers
-bind = Super+Shift, V, exec, qs -c \$qsConfig ipc call TEST_ALIVE || pkill fuzzel || cliphist list | fuzzel --match-mode fzf --dmenu | cliphist decode | wl-copy # [hidden]
-bind = Super, semicolon, global, quickshell:overviewEmojiToggle # Émojis (touche ; .)
-bind = Super, semicolon, exec, qs -c \$qsConfig ipc call TEST_ALIVE || pkill fuzzel || ~/.config/hypr/hyprland/scripts/fuzzel-emoji.sh copy # [hidden]
-bind = Super, K, global, quickshell:oskToggle # Clavier virtuel
-bind = Super, M, global, quickshell:mediaControlsToggle # Contrôles multimédia
-bind = Super, G, global, quickshell:overlayToggle # Overlay de widgets
-bind = Super, J, global, quickshell:barToggle # Afficher / masquer la barre
-bind = Ctrl+Super, T, global, quickshell:wallpaperSelectorToggle # Choisir un fond d'écran
-bind = Ctrl+Super+Alt, T, global, quickshell:wallpaperSelectorRandom # Fond d'écran aléatoire
-bind = Ctrl+Super, T, exec, qs -c \$qsConfig ipc call TEST_ALIVE || ~/.config/quickshell/\$qsConfig/scripts/colors/switchwall.sh # [hidden]
-bind = Ctrl+Super, P, global, quickshell:panelFamilyCycle # Changer de style de panneaux
-bind = Ctrl+Super, R, exec, killall ydotool qs quickshell; qs -c \$qsConfig & # Redémarrer Quickshell (widgets)
-bind = Super, F5, exec, hyprctl reload && notify-send -a Hyprland "Configuration rechargée" # Recharger la configuration Hyprland
-bind = Ctrl+Super, F1, exec, xdg-open ~/.config/illogical-impulse/config.json # [hidden]
-bind = Ctrl+Super+Alt, F1, exec, xdg-open ~/.config/hypr/custom/keybinds.user.conf # [hidden]
-bind = Super+Shift+Alt, F1, exec, qs -p ~/.config/quickshell/\$qsConfig/welcome.qml # [hidden]
-
-##! Son et multimédia
-#/# bind = , Touches multimédia,, # Volume, muet, micro, lecture, luminosité (sans Super)
-bindle = , XF86AudioRaiseVolume, exec, wpctl set-volume -l 1.5 @DEFAULT_AUDIO_SINK@ 2%+ # [hidden]
-bindle = , XF86AudioLowerVolume, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 2%- # [hidden]
-bindl = , XF86AudioMute, exec, wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle # [hidden]
-bindl = , XF86AudioMicMute, exec, wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle # [hidden]
-bindl = Alt, XF86AudioMute, exec, wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle # [hidden]
-bindle = , XF86MonBrightnessUp, exec, qs -c \$qsConfig ipc call brightness increment || brightnessctl s 5%+ # [hidden]
-bindle = , XF86MonBrightnessDown, exec, qs -c \$qsConfig ipc call brightness decrement || brightnessctl s 5%- # [hidden]
-bindl = , XF86AudioPlay, exec, playerctl play-pause # [hidden]
-bindl = , XF86AudioPause, exec, playerctl play-pause # [hidden]
-bindl = , XF86AudioNext, exec, playerctl next # [hidden]
-bindl = , XF86AudioPrev, exec, playerctl previous # [hidden]
-bindl = , XF86AudioStop, exec, playerctl stop # [hidden]
-bindl = Super+Shift, M, exec, wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle # Couper / rétablir le son
-bindl = Super+Alt, M, exec, wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle # Couper / rétablir le micro
-bindl = Super+Shift, P, exec, playerctl play-pause # Lecture / pause
-bindl = Super+Shift, N, exec, playerctl next # Piste suivante
-bindl = Super+Shift, B, exec, playerctl previous # Piste précédente
-bind = Ctrl+Super, V, exec, \$volumeMixer # Mixeur de volume
-
-##! Captures et outils
-bind = Super, S, global, quickshell:regionScreenshot # Capture d'une zone (copier, enregistrer, annoter)
-bind = Super, S, exec, qs -c \$qsConfig ipc call TEST_ALIVE || pidof slurp || hyprshot --freeze --clipboard-only --mode region --silent # [hidden]
-bind = Super+Shift, S, global, quickshell:regionScreenshot # [hidden]
-bind = Super+Shift, S, exec, qs -c \$qsConfig ipc call TEST_ALIVE || pidof slurp || hyprshot --freeze --clipboard-only --mode region --silent # [hidden]
-bindl = , Print, exec, \$screenshotHelper full-clip # Écran complet -> presse-papiers
-bindl = Ctrl, Print, exec, \$screenshotHelper full-file # Écran complet -> fichier + presse-papiers
-bindl = Shift, Print, exec, \$screenshotHelper region-file # Zone -> fichier + presse-papiers
-bind = Super+Shift, X, global, quickshell:regionOcr # Reconnaissance de texte (OCR)
-bind = Super+Shift, X, exec, qs -c \$qsConfig ipc call TEST_ALIVE || \$screenshotHelper ocr # [hidden]
-bind = Super+Shift, A, global, quickshell:regionSearch # Recherche visuelle d'une zone
-bind = Super+Shift, A, exec, qs -c \$qsConfig ipc call TEST_ALIVE || pidof slurp || ~/.config/hypr/hyprland/scripts/snip_to_search.sh # [hidden]
-bind = Super+Shift, T, global, quickshell:screenTranslate # Traduire le contenu de l'écran
-bind = Super+Shift, C, exec, hyprpicker -a # Pipette de couleur -> presse-papiers
-bindl = Super+Shift, R, global, quickshell:regionRecord # Enregistrer une zone (sans son)
-bindl = Super+Shift, R, exec, qs -c \$qsConfig ipc call TEST_ALIVE || ~/.config/quickshell/\$qsConfig/scripts/videos/record.sh # [hidden]
-bindl = Super+Alt, R, global, quickshell:regionRecord # [hidden]
-bindl = Ctrl+Alt, R, exec, ~/.config/quickshell/\$qsConfig/scripts/videos/record.sh --fullscreen # Enregistrer l'écran (sans son)
-bindl = Super+Shift+Alt, R, exec, ~/.config/quickshell/\$qsConfig/scripts/videos/record.sh --fullscreen --sound # Enregistrer l'écran (avec son)
-binde = Super, equal, exec, ~/.config/hypr/hyprland/scripts/zoom.sh increase 0.3 # Zoom avant (touche =)
-binde = Super, parenright, exec, ~/.config/hypr/hyprland/scripts/zoom.sh decrease 0.3 # Zoom arrière (touche ))
-binde = Super, code:86, exec, qs -c \$qsConfig ipc call zoom zoomIn # [hidden]
-binde = Super, code:82, exec, qs -c \$qsConfig ipc call zoom zoomOut # [hidden]
-
-#!
-##! Fenêtres
-bind = Super, Q, killactive, # Fermer la fenêtre active
-bind = Alt, F4, killactive, # [hidden]
-bind = Super+Shift+Alt, Q, exec, hyprctl kill # Forcer la fermeture (cliquer la fenêtre)
-bind = Super, F, fullscreen, 0 # Plein écran
-bind = Super, D, fullscreen, 1 # Maximiser
-bind = Super+Alt, F, fullscreenstate, 0 3 # [hidden]
-bind = Super, V, togglefloating, # Flottant / mosaïque
-bind = Super+Alt, Space, togglefloating, # [hidden]
-bind = Super+Alt, V, centerwindow, # Centrer la fenêtre flottante
-bind = Super, P, pseudo, # Mode pseudo-mosaïque
-bind = Super+Alt, P, pin, # Épingler sur tous les bureaux
-bind = Super+Shift, J, layoutmsg, togglesplit # Inverser le sens de découpe
-bind = Alt, Tab, cyclenext, # Fenêtre suivante
-bind = Alt, Tab, bringactivetotop, # [hidden]
-bind = Alt+Shift, Tab, cyclenext, prev # [hidden]
-bind = Alt+Shift, Tab, bringactivetotop, # [hidden]
-bindm = Super, mouse:272, movewindow # Super + clic gauche : déplacer
-bindm = Super, mouse:274, movewindow # [hidden]
-bindm = Super, mouse:273, resizewindow # Super + clic droit : redimensionner
-#/# bind = Super, ←/↑/→/↓,, # Déplacer le focus
-bind = Super, Left, movefocus, l # [hidden]
-bind = Super, Right, movefocus, r # [hidden]
-bind = Super, Up, movefocus, u # [hidden]
-bind = Super, Down, movefocus, d # [hidden]
-#/# bind = Super+Shift, ←/↑/→/↓,, # Déplacer la fenêtre
-bind = Super+Shift, Left, movewindow, l # [hidden]
-bind = Super+Shift, Right, movewindow, r # [hidden]
-bind = Super+Shift, Up, movewindow, u # [hidden]
-bind = Super+Shift, Down, movewindow, d # [hidden]
-#/# bind = Super+Ctrl, ←/↑/→/↓,, # Redimensionner la fenêtre
-binde = Super+Ctrl, Left, resizeactive, -40 0 # [hidden]
-binde = Super+Ctrl, Right, resizeactive, 40 0 # [hidden]
-binde = Super+Ctrl, Up, resizeactive, 0 -40 # [hidden]
-binde = Super+Ctrl, Down, resizeactive, 0 40 # [hidden]
-
-##! Bureaux virtuels (1 à 10)
-#/# bind = Super, & é " ' ( - è _ ç à,, # Aller au bureau 1 … 10
-${ws_go}#/# bind = Super+Shift, & é " ' ( - è _ ç à,, # Déplacer la fenêtre vers le bureau 1 … 10
-${ws_move}#/# bind = Super+Alt, & é " ' ( - è _ ç à,, # Envoyer la fenêtre (sans la suivre)
-${ws_silent}${kp_go}${kp_silent}#/# bind = Super, Page↑ / Page↓,, # Bureau précédent / suivant
-bind = Super, Page_Up, workspace, -1 # [hidden]
-bind = Super, Page_Down, workspace, +1 # [hidden]
-#/# bind = Super+Alt, ← / →,, # Bureau précédent / suivant (écran courant)
-bind = Super+Alt, Left, workspace, r-1 # [hidden]
-bind = Super+Alt, Right, workspace, r+1 # [hidden]
-#/# bind = Super+Shift, Page↑ / Page↓,, # Déplacer la fenêtre vers le bureau précédent / suivant
-bind = Super+Shift, Page_Up, movetoworkspace, r-1 # [hidden]
-bind = Super+Shift, Page_Down, movetoworkspace, r+1 # [hidden]
-bind = Super+Shift+Alt, Left, movetoworkspace, r-1 # [hidden]
-bind = Super+Shift+Alt, Right, movetoworkspace, r+1 # [hidden]
-bind = Ctrl+Super+Shift, Left, movetoworkspace, r-1 # [hidden]
-bind = Ctrl+Super+Shift, Right, movetoworkspace, r+1 # [hidden]
-#/# bind = Ctrl+Super+Alt, ← / →,, # Bureau occupé précédent / suivant
-bind = Ctrl+Super+Alt, Left, workspace, m-1 # [hidden]
-bind = Ctrl+Super+Alt, Right, workspace, m+1 # [hidden]
-#/# bind = Super, Molette,, # Changer de bureau
-bind = Super, mouse_up, workspace, +1 # [hidden]
-bind = Super, mouse_down, workspace, -1 # [hidden]
-bind = Super+Shift, mouse_up, movetoworkspace, r+1 # [hidden]
-bind = Super+Shift, mouse_down, movetoworkspace, r-1 # [hidden]
-bind = Super+Ctrl, E, workspace, empty # Aller au premier bureau vide
-bind = Super+Ctrl+Shift, E, movetoworkspace, empty # Déplacer la fenêtre vers un bureau vide
-bind = Ctrl+Super, S, togglespecialworkspace, # Bureau spécial (bloc-notes) : afficher / masquer
-bind = Super+Alt, S, movetoworkspacesilent, special # Envoyer la fenêtre au bureau spécial
-bind = Super, mouse:275, togglespecialworkspace, # [hidden]
-
-##! Session
-bind = Super, L, exec, loginctl lock-session # Verrouiller la session
-bindl = Super+Shift, L, exec, systemctl suspend || loginctl suspend # Mettre en veille
-bind = Ctrl+Shift+Alt+Super, Delete, exec, systemctl poweroff || loginctl poweroff # [hidden]
-
-#!
-##! Applications
-bind = Super, R, exec, \$terminal # Terminal (kitty)
-bind = Super, Return, exec, \$terminal # [hidden]
-bind = Super, T, exec, \$terminal # [hidden]
-bind = Ctrl+Alt, T, exec, \$terminal # [hidden]
-bind = Super, E, exec, \$fileManager # Gestionnaire de fichiers (Dolphin)
-bind = Super, B, exec, \$browser # Navigateur
-bind = Super, W, exec, \$browser # [hidden]
-bind = Super, C, exec, \$calculator # Calculatrice
-bind = Ctrl+Super, C, exec, \$codeEditor # Éditeur de code (si installé)
-bind = Super, X, exec, \$textEditor # Éditeur de texte (si installé)
-bind = Super, I, exec, \$settingsApp # Paramètres
-bind = Ctrl+Shift, Escape, exec, \$taskManager # Gestionnaire de tâches
-bind = Ctrl+Super+Shift+Alt, W, exec, \$officeSoftware # [hidden]
-
-##! Machines virtuelles
-bind = Super+Alt, F1, exec, notify-send -a Hyprland "Raccourcis désactivés" "Super+Alt+F1 pour les réactiver" && hyprctl dispatch submap virtual-machine # Désactiver les raccourcis (VM)
-submap = virtual-machine
-bind = Super+Alt, F1, exec, notify-send -a Hyprland "Raccourcis réactivés" && hyprctl dispatch submap global # [hidden]
-submap = global
-
-source = ~/.config/hypr/custom/keybinds.user.conf
-EOF
-  [[ -f $HYPR_CUSTOM/keybinds.user.conf ]] || printf '# hyprlang noerror false\n# Vos raccourcis personnels (jamais écrasés par install.sh)\n' >"$HYPR_CUSTOM/keybinds.user.conf"
-
-  # Le fichier QWERTY d'end-4 n'est plus chargé ($dontLoadDefaultKeybinds) ; on le
-  # remplace par un fichier vide afin que l'aide (Super+F1), qui lit les deux
-  # fichiers, n'affiche que les raccourcis réellement actifs. Original conservé.
-  write_managed "$CFG/hypr/hyprland/keybinds.conf" <<EOF
-$MANAGED_MARK
-# Raccourcis QWERTY d'end-4 désactivés (\$dontLoadDefaultKeybinds = true).
-# Raccourcis actifs (AZERTY) : ~/.config/hypr/custom/keybinds.conf
-# Original : ~/.local/share/hypr-installer/manifests/end4-keybinds.upstream.conf
-EOF
+  [[ -f $HYPR_CUSTOM/keybinds_user.lua ]] || printf -- '-- Vos raccourcis (chargé après custom/keybinds.lua), ex. :\n-- hl.bind("SUPER + Return", hl.dsp.exec_cmd("kitty"))\n' >"$HYPR_CUSTOM/keybinds_user.lua"
   write_keybind_doc
-  ok "Raccourcis AZERTY générés ($(grep -cE '^bind' "$HYPR_CUSTOM/keybinds.conf") liaisons, 10 bureaux)"
+  ok "Raccourcis end-4 adaptés à l’AZERTY (bureaux, symboles, conflits des touches 4 et 6)"
 }
 
 write_keybind_doc() {
   mkdir -p "$MANIFEST_DIR"
   cat >"$MANIFEST_DIR/raccourcis-azerty.txt" <<'EOF'
-RACCOURCIS AZERTY (Super = touche Windows) — aide à l'écran : Super+F1
-Super+R terminal | Super+E fichiers | Super+Espace lanceur | Super (appui court) lanceur
-Super+Q fermer | Super+F plein écran | Super+D maximiser | Super+V flottant | Super+P pseudo
-Super+L verrouiller | Super+S capture de zone | Super+B navigateur | Super+C calculatrice
-Super+Échap menu système (déconnexion avec confirmation) | Super+F5 recharger Hyprland
-Ctrl+Super+R redémarrer Quickshell | Ctrl+Maj+Échap gestionnaire de tâches
-Super+flèches focus | Super+Maj+flèches déplacer | Super+Ctrl+flèches redimensionner
-Super+clic gauche déplacer | Super+clic droit redimensionner
-Super+& é " ' ( - è _ ç à : bureaux 1…10 | Super+Maj+(même touche) : déplacer la fenêtre
-Super+Alt+(même touche) : envoyer sans suivre | Super+PgPréc/PgSuiv ou Super+Alt+←/→ : bureau préc./suiv.
-Super+Maj+PgPréc/PgSuiv : déplacer vers bureau préc./suiv. | Super+Ctrl+E : bureau vide
-Impr : écran -> presse-papiers | Ctrl+Impr : écran -> fichier | Maj+Impr : zone -> fichier
-Super+Maj+V presse-papiers | Super+; émojis | Super+Tab vue d'ensemble | Super+N/A panneaux
-Touches multimédia (volume, muet, micro, lecture, luminosité) : sans Super, avec OSD
+RACCOURCIS (end-4, adaptés AZERTY) — aide à l'écran : Super+! (ou Super+/)
+Super seul : recherche/lanceur | Super+Tab : vue d'ensemble | Super+A / Super+N : panneaux
+Super+& é " ' ( - è _ ç à : bureaux 1…10
+Super+Maj+(même touche) : déplacer la fenêtre et suivre | Super+Alt+(même touche) : envoyer sans suivre
+Super+: émojis | Super+V presse-papiers | Super+Maj+S capture de zone | Super+L verrouiller
+Super+ù / Super+; : ratio de la fenêtre | Zoom : Super+= (avant), pavé numérique +/-
+Ctrl+Super+R : redémarrer les widgets | Ctrl+Alt+Suppr : menu de session
 EOF
 }
 
@@ -2371,14 +2081,15 @@ Name=Default
 Comment=$MANAGED_MARK
 Inherits=Bibata-Modern-Classic
 EOF
-  write_managed "$HYPR_CUSTOM/env.conf" <<EOF
-# hyprlang noerror false
-$MANAGED_MARK
-env = XCURSOR_THEME,Bibata-Modern-Classic
-env = XCURSOR_SIZE,24
-source = ~/.config/hypr/custom/env.user.conf
+  write_managed "$HYPR_CUSTOM/env.lua" <<EOF
+-- $MANAGED_MARK
+hl.env("XCURSOR_THEME", "Bibata-Modern-Classic")
+hl.env("XCURSOR_SIZE", "24")
+if is_file_exists(HOME .. "/.config/hypr/custom/env_user.lua") then
+    require("custom.env_user")
+end
 EOF
-  [[ -f $HYPR_CUSTOM/env.user.conf ]] || printf '# Variables d’environnement personnelles\n' >"$HYPR_CUSTOM/env.user.conf"
+  [[ -f $HYPR_CUSTOM/env_user.lua ]] || printf -- '-- Variables d’environnement personnelles : hl.env("NOM", "valeur")\n' >"$HYPR_CUSTOM/env_user.lua"
   ok "Thèmes : Darkly (Qt), adw-gtk3 (GTK, couleurs dynamiques matugen), breeze-plus, curseur Bibata"
 }
 
@@ -2413,19 +2124,22 @@ configure_startup() {
   if [[ $(readlink -f "$BIN_DIR/install.sh" 2>/dev/null) != "$SCRIPT_SELF" ]] && ! cmp -s "$SCRIPT_SELF" "$BIN_DIR/install.sh"; then
     install -m 755 "$SCRIPT_SELF" "$BIN_DIR/install.sh"
   fi
-  write_managed "$HYPR_CUSTOM/execs.conf" <<EOF
-# hyprlang noerror false
-$MANAGED_MARK
-# Premier démarrage : détection des écrans, fond d'écran + couleurs, tests de session.
-exec-once = ~/.local/share/hypr-installer/bin/install.sh --first-login
-source = ~/.config/hypr/custom/execs.user.conf
+  write_managed "$HYPR_CUSTOM/execs.lua" <<EOF
+-- $MANAGED_MARK
+-- Premier démarrage : détection des écrans, fond d'écran + couleurs, tests de session.
+hl.on("hyprland.start", function()
+    hl.exec_cmd(HOME .. "/.local/share/hypr-installer/bin/install.sh --first-login")
+end)
+if is_file_exists(HOME .. "/.config/hypr/custom/execs_user.lua") then
+    require("custom.execs_user")
+end
 EOF
-  [[ -f $HYPR_CUSTOM/execs.user.conf ]] || printf '# hyprlang noerror false\n# Vos programmes au démarrage (exec-once = …)\n' >"$HYPR_CUSTOM/execs.user.conf"
+  [[ -f $HYPR_CUSTOM/execs_user.lua ]] || printf -- '-- Vos programmes au démarrage :\n-- hl.on("hyprland.start", function() hl.exec_cmd("mon-programme") end)\n' >"$HYPR_CUSTOM/execs_user.lua"
   # Une seule instance de chaque composant : hypridle est lancé par end-4 (exec-once).
   if systemctl --user is-enabled hypridle.service &>/dev/null; then
     systemctl --user disable hypridle.service; info "hypridle.service (utilisateur) désactivé : lancé une seule fois par end-4"
   fi
-  local n; n=$(cat "$CFG/hypr/hyprland/execs.conf" "$HYPR_CUSTOM"/*.conf | awk '/^[[:space:]]*exec-once[[:space:]]*=[[:space:]]*(qs|quickshell)[[:space:]]/{c++} END{print c+0}')
+  local n; n=$(cat "$CFG/hypr/hyprland/execs.lua" "$HYPR_CUSTOM"/*.lua 2>/dev/null | grep -cE '^[[:space:]]*hl\.exec_cmd\("(qs|quickshell) ' || true)
   [[ $n == 1 ]] || warn "Quickshell est lancé $n fois dans la configuration (attendu : 1)"
   ok "Démarrage automatique configuré (Quickshell, hypridle, presse-papiers, agent polkit Quickshell, premier démarrage)"
 }
@@ -2536,29 +2250,16 @@ verify_step_3() {
     for want in ${wants//,/ }; do pkg_installed "$want" || vp_pkg "$want"; done
   done
   pkg_installed "$SPACE_GROTESK_PKG" || vp_pkg "$SPACE_GROTESK_PKG"
-  grep -qxF "IgnorePkg = ${PIN_ORDER[*]}" "$PACMAN_CONF" 2>/dev/null || vp "IgnorePkg absent de $PACMAN_CONF"
   return 0
 }
 
 verify_step_4() { verify_pkgs "${GRAPHICS_PKGS[@]}"; }
 
 verify_step_5() {
-  local n v
-  for n in "${PIN_ORDER[@]}"; do
-    v=$(pkg_version "$n")
-    if [[ -z $v ]]; then vp_pkg "$n (pile épinglée)"
-    elif [[ ${PIN_MODE[$n]} == src && $v != "${PIN_VER[$n]}${LOCAL_REL_SUFFIX}" ]]; then vp "$n $v : version archivée, doit être recompilé contre le système actuel"
-    elif [[ $n == aquamarine && $v != "${PIN_VER[$n]}${LOCAL_REL_SUFFIX}" && ! -f $STATE_DIR/aquamarine.fallback ]]; then vp "aquamarine $v : version archivée non corrigée (plantage au démarrage), à recompiler"
-    elif [[ $v != "${PIN_VER[$n]}" && $v != "${PIN_VER[$n]}${LOCAL_REL_SUFFIX}" ]]; then vp "$n en version $v (attendu ${PIN_VER[$n]})"
-    fi
-  done
-  [[ -f $PINS_LOCK ]] || vp "verrou des versions absent ($PINS_LOCK)"
-  grep -qxF "IgnorePkg = ${PIN_ORDER[*]}" "$PACMAN_CONF" 2>/dev/null || vp "IgnorePkg absent de $PACMAN_CONF"
-  [[ -f $HOOK_FILE && -x $HOOK_SCRIPT ]] || vp "hook pacman de surveillance absent"
-  if ((${#VERIFY_PROBLEMS[@]} == 0)); then
-    local broken; broken=$(pin_broken_list | xargs)
-    [[ -z $broken ]] || vp "bibliothèques manquantes (ABI) pour : $broken"
-  fi
+  verify_pkgs "${HYPR_PKGS[@]}"
+  local legacy; legacy=$(legacy_hypr_packages | xargs)
+  [[ -z $legacy ]] || vp "versions 2.x (épinglées/recompilées) encore installées : $legacy"
+  grep -qF '# hypr-installer: pile Hyprland' "$PACMAN_CONF" 2>/dev/null && vp "ancien IgnorePkg encore présent dans $PACMAN_CONF"
   return 0
 }
 
@@ -2567,7 +2268,7 @@ verify_step_6() {
   rel=$(cat "$CFG/illogical-impulse/hypr-installer-release" 2>/dev/null || true)
   [[ $rel == "$END4_TAG $END4_COMMIT" ]] || vp "fichiers end-4 $END4_TAG non déployés"
   [[ -f $CFG/quickshell/ii/shell.qml ]] || vp "configuration Quickshell end-4 absente"
-  [[ -f $CFG/hypr/hyprland.conf ]] || vp "hyprland.conf absent"
+  [[ -f $CFG/hypr/hyprland.lua ]] || vp "hyprland.lua absent"
   for m in "${END4_METAS[@]}"; do
     [[ $END4_OPTIONAL_METAS == *" $m "* ]] && continue
     pkg_installed "illogical-impulse-$m" || vp_pkg "illogical-impulse-$m"
@@ -2585,7 +2286,7 @@ verify_step_7() {
 }
 
 verify_step_8() {
-  grep -q '^[[:space:]]*kb_layout = fr$' "$HYPR_CUSTOM/general.conf" 2>/dev/null || vp "kb_layout = fr absent de $HYPR_CUSTOM/general.conf"
+  grep -q 'kb_layout = "fr"' "$HYPR_CUSTOM/general.lua" 2>/dev/null || vp "kb_layout = \"fr\" absent de $HYPR_CUSTOM/general.lua"
   if command -v localectl >/dev/null; then
     contains 'X11 Layout: fr' "$(localectl status 2>/dev/null || true)" || vp "disposition X11 (écran de connexion) différente de fr"
   fi
@@ -2593,16 +2294,14 @@ verify_step_8() {
 }
 
 verify_step_9() {
-  grep -qF "$MANAGED_MARK" "$HYPR_CUSTOM/keybinds.conf" 2>/dev/null || vp "raccourcis AZERTY absents ($HYPR_CUSTOM/keybinds.conf)"
-  grep -q '^\$dontLoadDefaultKeybinds = true' "$HYPR_CUSTOM/variables.conf" 2>/dev/null || vp "\$dontLoadDefaultKeybinds absent"
-  [[ -x $HYPR_CUSTOM/scripts/hypr-installer-screenshot.sh ]] || vp "script de capture absent"
+  grep -qF "$MANAGED_MARK" "$HYPR_CUSTOM/keybinds.lua" 2>/dev/null || vp "adaptation AZERTY absente ($HYPR_CUSTOM/keybinds.lua)"
   return 0
 }
 
 verify_step_10() {
-  grep -q -- '--first-login' "$HYPR_CUSTOM/execs.conf" 2>/dev/null || vp "démarrage automatique (--first-login) absent"
+  grep -q -- '--first-login' "$HYPR_CUSTOM/execs.lua" 2>/dev/null || vp "démarrage automatique (--first-login) absent"
   [[ -x $BIN_DIR/install.sh ]] || vp "copie de l’installateur absente ($BIN_DIR/install.sh)"
-  [[ -f $HYPR_CUSTOM/env.conf ]] || vp "custom/env.conf absent"
+  [[ -f $HYPR_CUSTOM/env.lua ]] || vp "custom/env.lua absent"
   [[ -f $HOME/.icons/default/index.theme ]] || vp "thème de curseur par défaut absent"
   return 0
 }
@@ -2655,15 +2354,11 @@ diagnose_prereqs() {
   chk_if "Espace disque /" '((free_root >= 25))' "${free_root} Go libres" FAIL "${free_root} Go libres (25 Go requis)"
   chk_if "Espace disque $HOME" '((free_home >= 20))' "${free_home} Go libres" FAIL "${free_home} Go libres (20 Go requis)"
   if ((net)); then
-    local remote
-    remote=$(git ls-remote "$END4_REPO" "refs/tags/$END4_TAG" "refs/tags/$END4_TAG^{}" 2>/dev/null | awk '{print $1}' | tail -n1 || true)
-    chk_if "Release end-4 $END4_TAG" '[[ $remote == "$END4_COMMIT" ]]' "${END4_COMMIT:0:12}" FAIL "le tag pointe sur ${remote:-?}"
-    local n bad=""
-    for n in "${PIN_ORDER[@]}"; do
-      [[ ${PIN_MODE[$n]} == src ]] && continue
-      url_exists "$ALA_URL/${n:0:1}/$n/$n-${PIN_VER[$n]}-x86_64.pkg.tar.zst" || bad+="$n "
-    done
-    chk_if "Paquets binaires archivés disponibles" '[[ -z $bad ]]' "disponibles (ou pile entièrement recompilée)" FAIL "indisponibles : $bad"
+    local lsr
+    lsr=$(git ls-remote "$END4_REPO" refs/heads/main 2>/dev/null | awk '{print $1}' || true)
+    chk_if "Dépôt end-4 joignable" '[[ -n $lsr ]]' "commit épinglé ${END4_COMMIT:0:12}" FAIL "git ls-remote a échoué"
+    local hv; hv=$(LC_ALL=C pacman -Si hyprland 2>/dev/null | awk -F': ' '/^Version/{print $2; exit}' | xargs || true)
+    chk_if "Hyprland disponible dans les dépôts" '[[ -n $hv ]]' "${hv:-?}" FAIL "introuvable (pacman -Sy ?)"
   else
     chk INFO "Versions distantes" "non vérifiées (réseau indisponible)"
   fi
@@ -2752,16 +2447,13 @@ validate_installation() {
   CHECK_LINES=(); CHECK_FAIL=0; CHECK_WARN=0; CHECK_PASS=0
   chk_if "EndeavourOS détecté" '[[ $OS_ID == endeavouros ]]' "$OS_NAME" WARN
   local hv; hv=$(Hyprland --version 2>/dev/null | head -1 || true)
-  chk_if "Hyprland 0.54.3 installé" '[[ $hv == *0.54.3* && $(pkg_version hyprland) == 0.54.3-* ]]' "${hv:-absent}"
-  local n bad=""
-  for n in "${PIN_ORDER[@]}"; do [[ $(pkg_version "$n") == "$(expected_pin_version "$n")" ]] || bad+="$n "; done
-  chk_if "Pile hypr* épinglée intacte" '[[ -z $bad && -f $PINS_LOCK ]]' "${#PIN_ORDER[@]} paquets" FAIL "dérive : ${bad:-verrou absent}"
-  local broken; broken=$(pin_broken_list | xargs)
-  chk_if "ABI de la pile (bibliothèques)" '[[ -z $broken ]]' "aucune bibliothèque manquante" FAIL "cassé : $broken"
-  chk_if "IgnorePkg (pacman.conf)" 'grep -qxF "IgnorePkg = ${PIN_ORDER[*]}" "$PACMAN_CONF"' "pile protégée de -Syu"
-  local vout; vout=$(Hyprland --verify-config -c "$CFG/hypr/hyprland.conf" 2>&1 || true)
+  chk_if "Hyprland installé (dépôts Arch)" '[[ -n $hv ]] && pkg_installed hyprland' "${hv:-absent}"
+  local legacy; legacy=$(legacy_hypr_packages | xargs)
+  chk_if "Pile Hyprland cohérente (dépôts)" '[[ -z $legacy ]]' "aucune version épinglée/recompilée restante" FAIL "à remplacer : $legacy"
+  chk_if "Aucun blocage de versions (IgnorePkg)" '! grep -qF "# hypr-installer: pile Hyprland" "$PACMAN_CONF"' "pacman.conf"
+  local vout; vout=$(Hyprland --verify-config -c "$CFG/hypr/hyprland.lua" 2>&1 || true)
   log "verify-config : $vout"
-  chk_if "Configuration hyprlang valide" 'grep -qi "config ok" <<<"$vout"' "Hyprland --verify-config" FAIL "$(grep -im1 -E 'error|erreur' <<<"$vout" || echo 'voir journal')"
+  chk_if "Configuration Lua valide" 'grep -qi "config ok" <<<"$vout"' "Hyprland --verify-config" FAIL "$(grep -im1 -E 'error|erreur' <<<"$vout" || echo 'voir journal')"
   local rel; rel=$(cat "$CFG/illogical-impulse/hypr-installer-release" 2>/dev/null || true)
   chk_if "End-4 release correcte" '[[ $rel == "$END4_TAG $END4_COMMIT" && -f $CFG/quickshell/ii/shell.qml ]]' "$END4_TAG ${END4_COMMIT:0:12}"
   local qdiff=""
@@ -2795,13 +2487,11 @@ validate_installation() {
   chk_if "Vulkan (RADV)" '[[ $vk == *RADV* ]]' "${vk:-non confirmé hors session}" WARN
   local fm="" fams; fams=$(fc-list : family); for c in "Google Sans Flex" "Material Symbols Rounded" "JetBrainsMono Nerd Font" "Noto Sans" "Font Awesome"; do containsi "$c" "$fams" || fm+="$c, "; done
   chk_if "Polices installées" '[[ -z $fm ]]' "end-4 + Noto + Nerd + Font Awesome" WARN "manquantes : ${fm%, }"
-  chk_if "AZERTY configuré" 'grep -q "kb_layout = fr" "$HYPR_CUSTOM/general.conf" && contains "X11 Layout: fr" "$(localectl status)"' "Hyprland, console, X11"
-  local nb; nb=$(grep -cE '^bind' "$HYPR_CUSTOM/keybinds.conf" 2>/dev/null || true); nb=${nb:-0}
-  chk_if "Raccourcis clavier configurés" 'grep -q "^\$dontLoadDefaultKeybinds = true" "$HYPR_CUSTOM/variables.conf" && ((nb > 100))' "$nb liaisons AZERTY"
-  local wsn; wsn=$(grep -cE '^bind = Super(\+Shift)?, code:(1[0-9]),' "$HYPR_CUSTOM/keybinds.conf" 2>/dev/null || true); wsn=${wsn:-0}
-  chk_if "Workspaces 1-10 configurés" '((wsn == 20))' "Super+[1-0] et Super+Maj+[1-0]"
+  chk_if "AZERTY configuré" "grep -q 'kb_layout = \"fr\"' \"\$HYPR_CUSTOM/general.lua\" && contains 'X11 Layout: fr' \"\$(localectl status)\"" "Hyprland, console, X11"
+  chk_if "Raccourcis AZERTY configurés" 'grep -qF "$MANAGED_MARK" "$HYPR_CUSTOM/keybinds.lua" && grep -q "SUPER + ALT + code:" "$HYPR_CUSTOM/keybinds.lua"' "end-4 + adaptation AZERTY"
+  chk_if "Bureaux 1-10 par touches physiques" 'grep -q "\"SUPER + code:\" .. numberkey" "$CFG/hypr/hyprland/keybinds.lua"' "Super+& é \" ' ( - è _ ç à"
   chk_if "Gestionnaire de connexion" '[[ -n $CURRENT_DM ]] && systemctl is-enabled --quiet "$CURRENT_DM.service"' "${CURRENT_DM:-aucun}"
-  chk_if "Autostart configuré" 'grep -q -- "--first-login" "$HYPR_CUSTOM/execs.conf" && [[ -x $BIN_DIR/install.sh ]]' "exec-once (end-4 + premier démarrage)"
+  chk_if "Autostart configuré" 'grep -q -- "--first-login" "$HYPR_CUSTOM/execs.lua" && [[ -x $BIN_DIR/install.sh ]]' "hyprland.start (end-4 + premier démarrage)"
   local dup=""; for c in dunst mako swaync hyprpolkitagent; do pkg_installed "$c" && dup+="$c "; done
   systemctl --user is-enabled hypridle.service &>/dev/null && dup+="hypridle.service "
   chk_if "Aucun conflit de démarrage" '[[ -z $dup ]]' "instance unique de chaque composant" WARN "à vérifier : $dup"
@@ -2844,26 +2534,25 @@ generate_report() {
 wait_for() { local t=$1; shift; local i; for ((i = 0; i < t; i++)); do "$@" &>/dev/null && return 0; sleep 1; done; return 1; }
 
 session_monitors() {
-  local conf="$CFG/hypr/monitors.conf" line
-  if grep -qE '^\s*monitor\s*=' "$conf" 2>/dev/null; then log "monitors.conf déjà configuré"; return 0; fi
-  local out=""
+  # end-4 charge ~/.config/hypr/monitors.lua s'il existe (format nwg-displays).
+  local conf="$CFG/hypr/monitors.lua" out=""
+  if grep -q 'hl.monitor' "$conf" 2>/dev/null; then log "monitors.lua déjà configuré"; return 0; fi
   while IFS=$'\t' read -r name w h modes; do
-    local best="" bestr=0 m r
+    local best="" bestr=0 m r scale=1
     for m in $modes; do
       [[ $m == "${w}x${h}@"* ]] || continue
       r=${m#*@}; r=${r%Hz}
       if awk -v a="$r" -v b="$bestr" 'BEGIN{exit !(a>b)}'; then bestr=$r; best=$m; fi
     done
     [[ -n $best ]] || continue
-    local scale=1; ((w >= 3840)) && scale=auto
-    line="monitor = $name, ${best%Hz}, auto, $scale"
-    out+="$line"$'\n'
-    log "Écran $name : $line (modes : $modes)"
+    ((w >= 3840)) && scale='"auto"'
+    out+="hl.monitor({ output = \"$name\", mode = \"${best%Hz}\", position = \"auto\", scale = $scale })"$'\n'
+    log "Écran $name : ${best%Hz} (modes : $modes)"
   done < <(hyprctl monitors all -j | jq -r '.[] | [.name, (.width|tostring), (.height|tostring), (.availableModes|join(" "))] | @tsv')
   [[ -n $out ]] || return 0
-  { cat "$conf" 2>/dev/null; printf '\n%s — détecté au premier démarrage (résolution native, fréquence max.)\n%s' "$MANAGED_MARK" "$out"; } >"$conf.tmp"
+  printf -- '-- %s — détecté au premier démarrage (résolution native, fréquence max.)\n%s' "$MANAGED_MARK" "$out" >"$conf.tmp"
   mv -f "$conf.tmp" "$conf"
-  hyprctl reload >/dev/null
+  hyprctl reload >/dev/null 2>&1 || true
 }
 
 session_wallpaper() {
@@ -2879,7 +2568,7 @@ post_login_check() {
   CHECK_LINES=(); CHECK_FAIL=0; CHECK_WARN=0; CHECK_PASS=0
   [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] || { chk FAIL "Session Hyprland" "à lancer depuis une session Hyprland"; return 0; }
   local v; v=$(hyprctl version -j 2>/dev/null | jq -r '.tag // .version // ""')
-  chk_if "Hyprland en cours d’exécution" '[[ $v == *0.54.3* ]]' "$v"
+  chk_if "Hyprland en cours d’exécution" '[[ -n $v ]]' "$v"
   chk_if "Wayland opérationnel" '[[ -n ${WAYLAND_DISPLAY:-} && $XDG_SESSION_TYPE == wayland ]]' "${WAYLAND_DISPLAY:-?}"
   chk_if "Quickshell opérationnel" 'qs -c ii ipc call TEST_ALIVE' "IPC TEST_ALIVE"
   local nq nq2; nq=$(pgrep -xc qs 2>/dev/null || true); nq2=$(pgrep -xc quickshell 2>/dev/null || true); nq=$(( ${nq:-0} + ${nq2:-0} ))
@@ -2891,8 +2580,7 @@ post_login_check() {
   local km; km=$(hyprctl devices -j | jq -r '[.keyboards[] | select(.main == true) | .active_keymap][0] // .keyboards[0].active_keymap')
   chk_if "Disposition AZERTY active" '[[ $km == *French* ]]' "$km"
   local nb; nb=$(hyprctl binds -j | jq 'length')
-  chk_if "Raccourcis chargés" '((nb > 100))' "$nb liaisons actives"
-  chk_if "Raccourci Super+R (terminal)" 'hyprctl binds -j | jq -e ".[] | select(.modmask == 64 and .key == \"R\")" >/dev/null' "kitty"
+  chk_if "Raccourcis chargés" '((nb > 50))' "$nb liaisons actives"
   chk_if "Workspaces Super+1…0" '(( $(hyprctl binds -j | jq "[.[] | select(.modmask == 64 and (.keycode >= 10 and .keycode <= 19))] | length") == 10 ))' "codes physiques 10-19"
   chk_if "Écrans détectés" 'hyprctl monitors -j | jq -e "length > 0" >/dev/null' "$(hyprctl monitors -j | jq -r '.[] | "\(.name) \(.width)x\(.height)@\(.refreshRate|floor)Hz"' | paste -sd', ')"
   local r; r=$(hyprctl -j getoption decoration:blur:passes | jq -r '.int')
@@ -2939,26 +2627,27 @@ hypr_trial() {   # hypr_trial <fichier de configuration> <journal>
 # dichotomie du fichier « source = » qui déclenche l'arrêt.
 session_bisect_config() {   # session_bisect_config <rapport> <nom du tableau d'indices>
   local out=$1; local -n ev=$2
-  local dir="$CFG/hypr" main="$CFG/hypr/hyprland.conf" t="$CFG/hypr/.hypr-installer-trial.conf" tl="$TMP_DIR/trial.log"
+  local dir="$CFG/hypr" main="$CFG/hypr/hyprland.lua" t="$CFG/hypr/.hypr-installer-trial.lua" tl="$TMP_DIR/trial.log" cm="--" re='^[[:space:]]*require\('
+  if [[ ! -f $main ]]; then main="$CFG/hypr/hyprland.conf" t="$CFG/hypr/.hypr-installer-trial.conf" cm="#" re='^[[:space:]]*source[[:space:]]*='; fi
   local -a srcs=(); local n lo hi mid i culprit="" line
   ui "  Recherche de la cause (plusieurs lancements de 10 s, l’écran va basculer)…"
-  printf 'monitor = , preferred, auto, 1\n' >"$t"
+  if [[ $cm == "--" ]]; then printf -- '-- configuration vide (test)\n' >"$t"; else printf 'monitor = , preferred, auto, 1\n' >"$t"; fi
   if ! hypr_trial "$t" "$tl"; then
     ev+=("Hyprland plante même avec une configuration VIDE : binaire ou bibliothèques en cause -> ./install.sh --repair")
     { printf '\n--- essai configuration vide : plantage ---\n'; tail -n 30 "$tl"; } >>"$out"
     rm -f -- "$t"; return 0
   fi
   ev+=("Hyprland fonctionne avec une configuration vide : la cause est dans la configuration.")
-  mapfile -t srcs < <(grep -nE '^[[:space:]]*source[[:space:]]*=' "$main" | cut -d: -f1)
+  mapfile -t srcs < <(grep -nE "$re" "$main" | cut -d: -f1)
   n=${#srcs[@]}
   trial_upto() {   # n'active que les k premiers « source = »
     local k=$1 j
     cp -f -- "$main" "$t"
-    for ((j = k; j < n; j++)); do sed -i "${srcs[j]}s/^/# hypr-installer-test: /" "$t"; done
+    for ((j = k; j < n; j++)); do sed -i "${srcs[j]}s/^/$cm hypr-installer-test: /" "$t"; done
     hypr_trial "$t" "$tl"
   }
   if ! trial_upto 0; then
-    ev+=("Plantage causé par hyprland.conf lui-même (hors fichiers inclus).")
+    ev+=("Plantage causé par ${main##*/} lui-même (hors fichiers inclus).")
   else
     lo=1; hi=$n
     while ((lo < hi)); do
@@ -2966,8 +2655,8 @@ session_bisect_config() {   # session_bisect_config <rapport> <nom du tableau d'
       if trial_upto "$mid"; then lo=$((mid + 1)); else hi=$mid; fi
     done
     line=$(sed -n "${srcs[lo-1]}p" "$main")
-    culprit=$(sed -E 's/^[[:space:]]*source[[:space:]]*=[[:space:]]*//' <<<"$line")
-    ev+=("Fichier qui provoque le plantage : $culprit (ligne ${srcs[lo-1]} de hyprland.conf)")
+    culprit=$(sed -E 's/^[[:space:]]*(source[[:space:]]*=[[:space:]]*|require\(")//; s/"\).*//' <<<"$line")
+    ev+=("Fichier qui provoque le plantage : $culprit (ligne ${srcs[lo-1]} de ${main##*/})")
     { printf '\n--- fichier en cause : %s ---\n' "$culprit"; cat "$dir/$culprit" 2>&1 | head -n 120
       printf '\n--- journal de l’essai fautif ---\n'; trial_upto "$lo" || true; grep -m1 -B25 -E 'terminate called|received signal' "$tl" || tail -n 25 "$tl"; } >>"$out" 2>&1
   fi
@@ -3013,7 +2702,7 @@ session_debug() {
     journalctl -b --no-pager -o short _COMM=Hyprland _COMM=start-hyprland 2>/dev/null | tail -n 40
     printf '\n--- plantages (coredumpctl) ---\n'; coredumpctl list --no-pager 2>/dev/null | grep -iE 'hypr|aquamarine' | tail -n 5
     printf '\n--- bibliothèques ---\n'; LC_ALL=C ldd /usr/bin/Hyprland 2>&1 | grep -i 'not found' || echo "aucune bibliothèque manquante"
-    printf '\n--- vérification de la configuration ---\n'; Hyprland --verify-config -c "$CFG/hypr/hyprland.conf" 2>&1 | tail -n 15
+    printf '\n--- vérification de la configuration ---\n'; Hyprland --verify-config -c "$CFG/hypr/hyprland.lua" 2>&1 | tail -n 15
   } >>"$out" 2>&1
 
   # Lancement contrôlé depuis ce TTY : montre l'erreur exacte si Hyprland meurt.
@@ -3086,7 +2775,7 @@ session_debug() {
 usage() {
   cat <<EOF
 HYPRLAND AUTOMATED INSTALLER $INSTALLER_VERSION
-EndeavourOS × Hyprland ${PIN_VER[hyprland]%-*} × end-4/dots-hyprland $END4_TAG
+EndeavourOS × Hyprland (dépôts Arch, Lua) × end-4/dots-hyprland $END4_TAG
 
 Usage : ./install.sh [options]
 
@@ -3094,7 +2783,7 @@ Usage : ./install.sh [options]
   --yes                Ne pas demander la confirmation initiale
   --force              Réexécuter toutes les étapes (ignore les points de reprise)
   --diagnose           Mode diagnostic : contrôles et rapport, aucune modification
-  --repair             Réparation : revérifie la pile épinglée, recompile ce qui est
+  --repair             Réparation : revérifie et réinstalle ce qui est
                        cassé (ex. après une mise à jour de bibliothèque), redéploie
   --post-login-check   Tests à exécuter DANS la session Hyprland
   --session-debug      Depuis un TTY : explique pourquoi la session Hyprland se
