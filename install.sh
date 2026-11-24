@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="2.0.6"
+readonly INSTALLER_VERSION="2.0.7"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
 readonly CHECKPOINT_SCHEMA=2
 readonly MAIN_PID=$$
@@ -2983,7 +2983,10 @@ session_debug() {
   grep -qiE 'error while loading shared libraries' <<<"$txt" && evidence+=("$(grep -m1 -i 'error while loading shared libraries' <<<"$txt")")
   grep -qiE "start-hyprland: (command )?not found|No such file or directory.*start-hyprland|cannot access '[^']*start-hyprland'" <<<"$txt" && evidence+=("Le lanceur start-hyprland est introuvable alors que la session l’appelle.")
   grep -qiE 'segmentation fault|SIGSEGV|SIGABRT|core dumped' <<<"$txt" && evidence+=("Hyprland plante (signal) : voir le rapport de plantage ci-dessous.")
-  grep -qiE 'failed to open drm|no gpus|couldn.t find a suitable gpu|backend.*failed' <<<"$txt" && evidence+=("Le GPU n’a pas pu être ouvert : $(grep -m1 -iE 'failed to open drm|no gpus|suitable gpu|backend.*failed' <<<"$txt")")
+  # (« Wayland backend cannot start » est normal depuis un TTY : ce n'est pas une panne GPU.)
+  grep -qiE 'failed to open drm|no gpus|couldn.t find a suitable gpu|CBackend::create\(\) failed' <<<"$txt" && evidence+=("Le GPU n’a pas pu être ouvert : $(grep -m1 -iE 'failed to open drm|no gpus|suitable gpu|CBackend::create' <<<"$txt")")
+  local what; what=$(grep -m1 -A1 'terminate called' <<<"$txt" | grep -m1 'what()' | sed 's/^[[:space:]]*//')
+  [[ -n $what ]] && evidence+=("Exception C++ : $what")
   grep -qiE 'libseat|seatd|logind.*(fail|denied)|couldn.t (take|open) .*seat' <<<"$txt" && evidence+=("Accès au siège (logind/libseat) refusé : $(grep -m1 -iE 'libseat|seatd|seat' <<<"$txt")")
   grep -qiE 'config error|error in config|parse error' <<<"$(grep -A15 -- '--- vérification de la configuration' <<<"$txt")" && evidence+=("Erreur de configuration hyprlang : $(grep -A15 -- '--- vérification de la configuration' <<<"$txt" | grep -m1 -iE 'error')")
   grep -qiE 'uwsm' <<<"$(grep -A5 'Session déclarée' <<<"$txt")" && evidence+=("La session choisie passe par uwsm : choisissez « Hyprland » (sans uwsm).")
@@ -3002,8 +3005,13 @@ session_debug() {
     sed -n '/--- contexte avant l’arrêt ---/,/^--- /p' "$out" | grep -v '^---' | tail -n 12 | cut -c1-150 | sed 's/^/    /' >&3
     ui ""
   fi
+  if [[ -n $crash ]]; then
+    ui "  ${C_B}Pile d’appels du dernier plantage (${crash/#$HOME/\~}) :${C_RST}"
+    sed -n '/[Bb]acktrace/,$p' "$crash" | head -n 22 | cut -c1-160 | sed 's/^/    /' >&3
+    ui ""
+  fi
   ui "  ${C_B}Extraits utiles :${C_RST}"
-  grep -iE 'error|fail|fatal|not found|undefined|abort|segfault|signal|cannot|couldn' "$out" | grep -viE 'warning|0 errors' | tail -n 15 | sed 's/^/    /' >&3 || true
+  grep -iE 'error|fail|fatal|not found|undefined|abort|segfault|signal|cannot|couldn|what\(\)' "$out" | grep -viE 'warning|0 errors|Creating the CHyprError|wl_display_connect|Implementation wayland failed|context extensions' | tail -n 15 | sed 's/^/    /' >&3 || true
   ui ""
   ui "  Rapport complet : ${out/#$HOME/\~}"
   ui "  En attendant : à l’écran de connexion, une autre session (ex. Plasma) reste utilisable si elle est installée."
