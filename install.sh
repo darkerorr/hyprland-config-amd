@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="3.2.0"
+readonly INSTALLER_VERSION="3.3.0"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
 readonly CHECKPOINT_SCHEMA=4
 readonly MAIN_PID=$$
@@ -177,6 +177,11 @@ readonly -a GRAPHICS_PKGS=(mesa vulkan-radeon vulkan-icd-loader libva-utils vulk
 # panneau de contrôle de la carte (LACT, équivalent du logiciel AMD Windows), amdgpu_top (moniteur).
 readonly -a GRAPHICS_EXTRA_PKGS=(lact amdgpu_top)
 readonly -a GRAPHICS_LIB32_PKGS=(lib32-mesa lib32-vulkan-radeon)
+# YouTube : la RX 550 (Polaris) décode H.264/HEVC en matériel, mais ni VP9 ni AV1,
+# formats envoyés par défaut -> décodage logiciel et saccades. L'extension
+# enhanced-h264ify fait servir du H.264 ; les navigateurs utilisent VA-API.
+readonly H264IFY_FIREFOX_ID="{9a41dee2-b924-4161-a971-7fb35c053a4a}"
+readonly H264IFY_CHROME_ID="omkfmpieigblcllmkgbflkikinpkodlk"
 readonly -a AUDIO_PKGS=(pipewire pipewire-alsa pipewire-pulse wireplumber alsa-utils pavucontrol-qt)
 readonly -a FONT_PKGS=(noto-fonts noto-fonts-cjk noto-fonts-emoji otf-font-awesome ttf-nerd-fonts-symbols ttf-jetbrains-mono-nerd fontconfig)
 readonly -a NET_PKGS=(networkmanager)
@@ -214,6 +219,8 @@ readonly USER_UNIT_DIR="$SYSROOT/usr/lib/systemd/user"
 readonly WALLPAPER_DIR="$SYSROOT/usr/share/backgrounds/archlinux"
 readonly DEFAULT_WALLPAPER="$WALLPAPER_DIR/mountain.jpg"
 readonly VCONSOLE_CONF="$SYSROOT/etc/vconsole.conf"
+readonly FIREFOX_POLICY="$SYSROOT/etc/firefox/policies/policies.json"
+readonly BRAVE_POLICY="$SYSROOT/etc/brave/policies/managed/hypr-installer-video.json"
 readonly X11_KEYBOARD_CONF="$SYSROOT/etc/X11/xorg.conf.d/00-keyboard.conf"
 readonly PIPEWIRE_GLOBAL_WANTS="$SYSROOT/etc/systemd/user/sockets.target.wants/pipewire.socket"
 readonly PIPEWIRE_VENDOR_WANTS="$SYSROOT/usr/lib/systemd/user/sockets.target.wants/pipewire.socket"
@@ -1415,6 +1422,7 @@ install_graphics() {
     spin "Activation de lactd (LACT)" sudo systemctl enable --now lactd.service || warn "lactd non activé (${LAST_CAUSE:-voir journal})."
   fi
   ok "Pilote AMD : amdgpu (noyau) + Mesa RADV (Vulkan), VA-API ; ${extra[*]:-aucun complément}"
+  configure_video_playback
   info "libva-mesa-driver et mesa-vdpau n’existent plus : VA-API est fourni par « mesa » (VDPAU abandonné par Mesa)."
   if [[ -d /sys/module/amdgpu ]]; then ok "Module noyau amdgpu chargé"; else warn "Module amdgpu non chargé (sera vérifié après redémarrage)."; fi
   if [[ -e /dev/dri/renderD128 ]]; then ok "Nœud de rendu /dev/dri/renderD128 présent"; fi
@@ -2301,6 +2309,8 @@ verify_step_3() {
 
 verify_step_4() {
   verify_pkgs "${GRAPHICS_PKGS[@]}"
+  grep -qF "$H264IFY_FIREFOX_ID" "$FIREFOX_POLICY" 2>/dev/null || vp "vidéo matérielle Firefox non configurée"
+  grep -qF "$H264IFY_CHROME_ID" "$BRAVE_POLICY" 2>/dev/null || vp "vidéo matérielle Brave non configurée"
   local p
   [[ -f $STATE_DIR/graphics.extra ]] || vp "compléments graphiques (32 bits, LACT) non installés"
   for p in $(state_get graphics.extra); do pkg_installed "$p" || vp_pkg "$p"; done
@@ -2492,6 +2502,30 @@ install_ai_skills() {
   ((n)) || { dev_soft_fail "Skills IA : aucune skill trouvée dans $SKILLS_REPO."; return 0; }
   state_set skills.count "$n"
   ok "Skills IA : $n installée(s) dans ~/.claude/skills$( ((kept)) && echo " ($kept skill(s) personnelle(s) conservée(s))")"
+}
+
+# Vidéo fluide (YouTube) : stratégies système des navigateurs, modifiables par
+# l'utilisateur (Status « default »), fichiers existants fusionnés et sauvegardés.
+configure_video_playback() {
+  pac_install ffmpeg jq
+  local ff tmp
+  ff=$(jq -n --arg id "$H264IFY_FIREFOX_ID" '{policies: {
+      ExtensionSettings: {($id): {installation_mode: "normal_installed",
+        install_url: "https://addons.mozilla.org/firefox/downloads/latest/enhanced-h264ify/latest.xpi"}},
+      Preferences: {
+        "media.ffmpeg.vaapi.enabled": {Value: true, Status: "default"},
+        "media.hardware-video-decoding.force-enabled": {Value: true, Status: "default"},
+        "gfx.webrender.all": {Value: true, Status: "default"}}}}')
+  if [[ -s $FIREFOX_POLICY ]]; then
+    tmp=$(jq -s '.[0] * .[1]' "$FIREFOX_POLICY" - <<<"$ff" 2>/dev/null) \
+      || { warn "Firefox : $FIREFOX_POLICY illisible (JSON invalide), laissé tel quel."; tmp=""; }
+    [[ -n $tmp ]] && sudo_write "$FIREFOX_POLICY" 644 <<<"$tmp"
+  else
+    sudo_write "$FIREFOX_POLICY" 644 <<<"$ff"
+  fi
+  sudo_write "$BRAVE_POLICY" 644 <<<"$(jq -n --arg id "$H264IFY_CHROME_ID" \
+    '{ExtensionInstallForcelist: [($id + ";https://clients2.google.com/service/update2/crx")]}')"
+  ok "YouTube : H.264 décodé par la carte (enhanced-h264ify) dans Firefox et Brave — redémarrez le navigateur"
 }
 
 # Brave : Wayland natif + décodage vidéo matériel (VA-API, RX 550). Lu par le

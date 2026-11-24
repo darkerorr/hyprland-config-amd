@@ -420,6 +420,8 @@ check "S1 skills IA installées (3) avec marqueur, modèle exclu" bash -c "for k
 check "S1 ~/.local/bin dans le PATH (environment.d, bash, fish)" bash -c "[[ -f '$H/.config/environment.d/90-hypr-installer-path.conf' && -f '$H/.config/fish/conf.d/hypr-installer-path.fish' ]] && grep -q 'hypr-installer: ~/.local/bin' '$H/.bashrc'"
 check "S1 docker.socket activé, groupe docker ajouté" bash -c "grep -q 'gpasswd -a' '$MOCK/calls.log'"
 check "S1 point de reprise 12 écrit" test -f "$STATE/step-12.done"
+check "S1 YouTube : h264ify + VA-API (Firefox)" bash -c "jq -e '.policies.ExtensionSettings[\"{9a41dee2-b924-4161-a971-7fb35c053a4a}\"].install_url and .policies.Preferences[\"media.ffmpeg.vaapi.enabled\"].Value' '$SR/etc/firefox/policies/policies.json' >/dev/null"
+check "S1 YouTube : h264ify (Brave)" grep -q 'omkfmpieigblcllmkgbflkikinpkodlk;https://clients2.google.com' "$SR/etc/brave/policies/managed/hypr-installer-video.json"
 
 # =============================================================================
 # S2. Relance après succès : tout est repris, rien n'est recompilé
@@ -705,9 +707,11 @@ check "S17 lien invalide refusé" bash -c "[[ $RC -ne 0 ]] && grep -q 'Lien inva
 # =============================================================================
 reset_all
 printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' >>"$SR/etc/pacman.conf"
+mkdir -p "$SR/etc/firefox/policies"; echo '{"policies":{"DisableTelemetry":true}}' >"$SR/etc/firefox/policies/policies.json"
 run_installer --yes
 check "S18 Super+F1 (aide) et Super+F2 (écrans) définis" bash -c "grep -q '\"SUPER + F1\", hl.dsp.global(\"quickshell:cheatsheetToggle\")' '$H/.config/hypr/custom/keybinds.lua' && grep -q '\"SUPER + F2\".*--monitors' '$H/.config/hypr/custom/keybinds.lua'"
 check "S18 pilotes 32 bits (multilib) + LACT installés, lactd activé" bash -c "[[ -f '$MOCK/db/lib32-vulkan-radeon' && -f '$MOCK/db/lib32-mesa' && -f '$MOCK/db/lact' ]] && grep -q 'enable --now lactd.service' '$MOCK/calls.log'"
+check "S18 stratégie Firefox existante fusionnée (rien de perdu)" bash -c "jq -e '.policies.DisableTelemetry == true and (.policies.ExtensionSettings | length) == 1' '$SR/etc/firefox/policies/policies.json' >/dev/null"
 check "S18 Brave : accélération vidéo + Wayland" grep -q 'AcceleratedVideoDecodeLinuxGL' "$H/.config/brave-flags.conf"
 cat >"$MOCK/monitors.json" <<'EOJ'
 [{"name":"DP-1","description":"BenQ XL2411","width":1920,"height":1080,"refreshRate":60.0,
