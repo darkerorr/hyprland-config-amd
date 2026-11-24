@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="2.0.4"
+readonly INSTALLER_VERSION="2.0.5"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
 readonly CHECKPOINT_SCHEMA=2
 readonly MAIN_PID=$$
@@ -2844,6 +2844,7 @@ first_login() {
   LOG_FILE="$LOG_DIR/first-login-$RUN_TS.log"
   exec 3>/dev/null 4>/dev/null 5>>"$LOG_FILE" >>"$LOG_FILE" 2>&1
   [[ -f $STATE_DIR/first-login.done ]] && { log "Premier démarrage déjà effectué"; return 0; }
+  [[ ${HYPR_INSTALLER_SESSION_TEST:-0} == 1 ]] && { log "Lancement d’essai (--session-debug) : premier démarrage différé"; return 0; }
   wait_for 60 hyprctl version || exit 0
   wait_for 60 qs -c ii ipc call TEST_ALIVE || log "Quickshell non joignable après 60 s"
   session_monitors
@@ -2857,6 +2858,99 @@ first_login() {
     notify-send -a "Installation Hyprland" "Bureau prêt ✔" "$CHECK_PASS tests OK, $CHECK_WARN avertissement(s). Super+F1 : liste des raccourcis."
   fi
   date '+%F %T' >"$STATE_DIR/first-login.done"
+}
+
+# =============================================================================
+# 17 bis. MODE --session-debug : pourquoi la session Hyprland se ferme-t-elle ?
+# =============================================================================
+# À lancer depuis un TTY (Ctrl+Alt+F3) quand l'écran de connexion revient après
+# le mot de passe. Rassemble tout ce qui existe sur le dernier démarrage de
+# session, en tire les causes connues, et peut tenter un lancement contrôlé.
+newest_file() {   # le fichier le plus récent parmi les arguments existants
+  local f best=""
+  for f in "$@"; do [[ -f $f ]] || continue; [[ -z $best || $f -nt $best ]] && best=$f; done
+  printf '%s' "$best"
+}
+session_debug() {
+  local out="$REPORT_DIR/session-debug-$RUN_TS.txt" f found=0 crash="" sessionlog="" hlog=""
+  local -a evidence=()
+  # Mode de collecte en lecture seule : une commande absente ou en échec ne doit
+  # pas interrompre l'analyse.
+  set +e; trap - ERR
+  ui ""; ui "  ${C_B}Analyse de l’échec de démarrage de la session Hyprland${C_RST}"
+  {
+    printf '=== hypr-installer %s — session-debug %s ===\n' "$INSTALLER_VERSION" "$(date '+%F %T')"
+    printf '\n--- Paquets ---\n'; pacman -Q hyprland aquamarine hyprutils hyprlang hyprgraphics hyprcursor sddm mesa 2>&1
+    printf '\n--- Session déclarée ---\n'; cat "$WAYLAND_SESSION" 2>&1; ls -l "$START_HYPRLAND" 2>&1
+    printf '\n--- État SDDM ---\n'; sudo cat "$SDDM_STATE" 2>/dev/null || echo "(illisible)"
+  } >"$out" 2>&1
+
+  # 1. Sortie de la session capturée par SDDM.
+  for f in "${XDG_DATA_HOME:-$HOME/.local/share}/sddm/wayland-session.log" "$HOME/.local/share/sddm/wayland-session.log"; do
+    [[ -s $f ]] && { sessionlog=$f; break; }
+  done
+  # 2. Rapports de plantage Hyprland (le plus récent).
+  # (nullglob est actif : un motif sans correspondance disparaît ; jamais de « ls » sans argument.)
+  crash=$(newest_file "${XDG_CACHE_HOME:-$HOME/.cache}"/hyprland/hyprlandCrashReport*.txt \
+                      "${XDG_DATA_HOME:-$HOME/.local/share}"/hyprland/hyprlandCrashReport*.txt)
+  # 3. Dernier journal Hyprland encore présent.
+  hlog=$(newest_file "${XDG_RUNTIME_DIR:-/run/user/$UID}"/hypr/*/hyprland.log "$HOME"/.local/share/hyprland/hyprland.log*)
+  {
+    printf '\n--- %s ---\n' "${sessionlog:-wayland-session.log absent}"; [[ -n $sessionlog ]] && tail -n 80 "$sessionlog"
+    printf '\n--- %s ---\n' "${crash:-aucun rapport de plantage}"; [[ -n $crash ]] && head -n 60 "$crash"
+    printf '\n--- %s ---\n' "${hlog:-aucun journal Hyprland}"; [[ -n $hlog ]] && tail -n 60 "$hlog"
+    printf '\n--- journal système (sddm, Hyprland) ---\n'
+    journalctl -b --no-pager -o short -u sddm 2>/dev/null | tail -n 40
+    journalctl -b --no-pager -o short _COMM=Hyprland _COMM=start-hyprland 2>/dev/null | tail -n 40
+    printf '\n--- plantages (coredumpctl) ---\n'; coredumpctl list --no-pager 2>/dev/null | grep -iE 'hypr|aquamarine' | tail -n 5
+    printf '\n--- bibliothèques ---\n'; LC_ALL=C ldd /usr/bin/Hyprland 2>&1 | grep -i 'not found' || echo "aucune bibliothèque manquante"
+    printf '\n--- vérification de la configuration ---\n'; Hyprland --verify-config -c "$CFG/hypr/hyprland.conf" 2>&1 | tail -n 15
+  } >>"$out" 2>&1
+
+  # Lancement contrôlé depuis ce TTY : montre l'erreur exacte si Hyprland meurt.
+  if [[ -t 0 && -z ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]] \
+     && ask_yes_no "Tenter un lancement de Hyprland depuis ce TTY pendant 20 s (l’écran basculera, il reviendra seul) ?"; then
+    local lt="$TMP_DIR/hyprland-tty.log" bin=Hyprland
+    [[ -x $START_HYPRLAND ]] && bin=$START_HYPRLAND
+    log "Lancement de test : $bin"
+    local trc=0
+    # HYPR_INSTALLER_SESSION_TEST : le premier démarrage (--first-login) ne doit
+    # pas se dérouler pendant ce lancement d'essai.
+    HYPR_INSTALLER_SESSION_TEST=1 timeout 20 "$bin" >"$lt" 2>&1 </dev/tty || trc=$?
+    { printf '\n--- lancement de test depuis le TTY (%s, code %s ; 124 = toujours en vie après 20 s) ---\n' "$bin" "$trc"; tail -n 60 "$lt"; } >>"$out"
+    if ((trc == 124)); then evidence+=("Hyprland démarre normalement depuis un TTY : le problème vient du lancement par l’écran de connexion (SDDM).")
+    else evidence+=("Hyprland s’arrête aussi depuis un TTY (code $trc) : le problème est dans Hyprland ou sa configuration.")
+    fi
+  fi
+
+  # Causes connues, par ordre de probabilité.
+  local txt; txt=$(cat "$out")
+  contains 'not found' "$(grep -A2 -- '--- bibliothèques' <<<"$txt")" && evidence+=("Bibliothèque manquante pour Hyprland -> ./install.sh --repair (recompilation de la pile).")
+  grep -qiE 'undefined symbol|symbol lookup error' <<<"$txt" && evidence+=("Symbole introuvable dans une bibliothèque (ABI) : $(grep -m1 -iE 'undefined symbol|symbol lookup error' <<<"$txt") -> ./install.sh --repair")
+  grep -qiE 'error while loading shared libraries' <<<"$txt" && evidence+=("$(grep -m1 -i 'error while loading shared libraries' <<<"$txt")")
+  grep -qiE "start-hyprland: (command )?not found|No such file or directory.*start-hyprland|cannot access '[^']*start-hyprland'" <<<"$txt" && evidence+=("Le lanceur start-hyprland est introuvable alors que la session l’appelle.")
+  grep -qiE 'segmentation fault|SIGSEGV|SIGABRT|core dumped' <<<"$txt" && evidence+=("Hyprland plante (signal) : voir le rapport de plantage ci-dessous.")
+  grep -qiE 'failed to open drm|no gpus|couldn.t find a suitable gpu|backend.*failed' <<<"$txt" && evidence+=("Le GPU n’a pas pu être ouvert : $(grep -m1 -iE 'failed to open drm|no gpus|suitable gpu|backend.*failed' <<<"$txt")")
+  grep -qiE 'libseat|seatd|logind.*(fail|denied)|couldn.t (take|open) .*seat' <<<"$txt" && evidence+=("Accès au siège (logind/libseat) refusé : $(grep -m1 -iE 'libseat|seatd|seat' <<<"$txt")")
+  grep -qiE 'config error|error in config|parse error' <<<"$(grep -A15 -- '--- vérification de la configuration' <<<"$txt")" && evidence+=("Erreur de configuration hyprlang : $(grep -A15 -- '--- vérification de la configuration' <<<"$txt" | grep -m1 -iE 'error')")
+  grep -qiE 'uwsm' <<<"$(grep -A5 'Session déclarée' <<<"$txt")" && evidence+=("La session choisie passe par uwsm : choisissez « Hyprland » (sans uwsm).")
+  [[ -z $sessionlog && -z $crash && -z $hlog ]] && evidence+=("Aucune trace de la session : elle s’arrête avant même de lancer Hyprland (script de session SDDM, shell de connexion).")
+  found=${#evidence[@]}
+
+  ui ""
+  if ((found)); then
+    ui "  ${C_B}Causes probables :${C_RST}"; printf '    • %s\n' "${evidence[@]}" >&3
+  else
+    ui "  Aucune cause connue reconnue automatiquement : voir les extraits du rapport."
+  fi
+  ui ""
+  ui "  ${C_B}Extraits utiles :${C_RST}"
+  grep -iE 'error|fail|fatal|not found|undefined|abort|segfault|signal|cannot|couldn' "$out" | grep -viE 'warning|0 errors' | tail -n 15 | sed 's/^/    /' >&3 || true
+  ui ""
+  ui "  Rapport complet : ${out/#$HOME/\~}"
+  ui "  En attendant : à l’écran de connexion, une autre session (ex. Plasma) reste utilisable si elle est installée."
+  printf '%s\n' "${evidence[@]}" | sed 's/^/CAUSE /' >>"$out"
+  return 0
 }
 
 # =============================================================================
@@ -2876,6 +2970,8 @@ Usage : ./install.sh [options]
   --repair             Réparation : revérifie la pile épinglée, recompile ce qui est
                        cassé (ex. après une mise à jour de bibliothèque), redéploie
   --post-login-check   Tests à exécuter DANS la session Hyprland
+  --session-debug      Depuis un TTY : explique pourquoi la session Hyprland se
+                       ferme après la connexion (rapport + causes probables)
   --allow-non-eos      Autoriser une base Arch autre qu’EndeavourOS
   --allow-other-gpu    Autoriser l’absence de GPU AMD
   --no-reboot-prompt   Ne pas proposer le redémarrage à la fin
@@ -2893,6 +2989,7 @@ parse_args() {
       --diagnose) MODE=diagnose ;;
       --repair) MODE=repair; FORCE=1 ;;
       --post-login-check) MODE=post-login-check ;;
+      --session-debug) MODE=session-debug ;;
       --first-login) MODE=first-login ;;
       --allow-non-eos) ALLOW_NON_EOS=1 ;;
       --allow-other-gpu) ALLOW_OTHER_GPU=1 ;;
@@ -2917,6 +3014,12 @@ main() {
   SPIN_OUTPUT_FILE="$TMP_DIR/last-command.out"
 
   if [[ $MODE == first-login ]]; then first_login; exit 0; fi
+  if [[ $MODE == session-debug ]]; then
+    LOG_FILE="$LOG_DIR/session-debug-$RUN_TS.log"
+    exec 3>&1 4>&2 5>>"$LOG_FILE"; exec >>"$LOG_FILE" 2>&1
+    session_debug
+    exit 0
+  fi
   if [[ $MODE == post-login-check ]]; then
     LOG_FILE="$LOG_DIR/post-login-$RUN_TS.log"
     exec 3>&1 4>&2 5>>"$LOG_FILE"; exec >>"$LOG_FILE" 2>&1
