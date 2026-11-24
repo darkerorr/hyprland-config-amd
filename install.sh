@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="3.4.0"
+readonly INSTALLER_VERSION="3.5.0"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
 readonly CHECKPOINT_SCHEMA=4
 readonly MAIN_PID=$$
@@ -2764,6 +2764,10 @@ def run_gui(start_page="ecrans"):
                      ["lact", "gui"], None),
                     ("utilities-system-monitor-symbolic", "Gestionnaire des tâches", "Aussi : Ctrl+Maj+Échap",
                      ["gnome-system-monitor"], None),
+                    ("dialog-information-symbolic", "Diagnostic des saccades",
+                     "Lancez d'abord la vidéo qui saccade : mesure carte, processeur, écrans (ne modifie rien)",
+                     ["kitty", "--hold", os.path.join(HOME, ".local/share/hypr-installer/bin/install.sh"),
+                      "--video-check"], None),
                 ]),
                 ("Bureau", [
                     ("preferences-desktop-appearance-symbolic", "Réglages du bureau",
@@ -3763,6 +3767,134 @@ first_login() {
 }
 
 # =============================================================================
+# 17 quater. MODE --video-check : pourquoi la vidéo / l'affichage saccade
+# =============================================================================
+# Lecture seule. À lancer PENDANT qu'une vidéo saccade : mesure processeur,
+# carte graphique, écrans et réglages qui peuvent provoquer des saccades, puis
+# indique les causes probables. Ne modifie rien.
+amd_card_dir() {
+  local d
+  for d in "$SYSROOT"/sys/class/drm/card[0-9]*/device; do
+    [[ $(cat "$d/vendor" 2>/dev/null) == 0x1002 ]] && { printf '%s\n' "$d"; return 0; }
+  done
+  return 1
+}
+
+video_check() {
+  CHECK_LINES=(); CHECK_FAIL=0; CHECK_WARN=0; CHECK_PASS=0
+  local -a causes=()
+  ui ""; ui "  ${C_B}Diagnostic vidéo et fluidité${C_RST} ${C_DIM}(lecture seule, rien n’est modifié)${C_RST}"
+  if ((!ASSUME_YES)) && [[ -r /dev/tty ]]; then
+    ui "  Lancez la vidéo qui saccade (en lecture), revenez ici, puis appuyez sur Entrée."
+    read -r -t 300 _ </dev/tty || true
+  fi
+  ui "  Mesure pendant 5 secondes…"
+
+  # --- Carte graphique et pilote
+  local drv card="" busy=0 n=0 b lvl sclk mclk
+  drv=$(lspci -k -d 1002::0300 2>/dev/null | awk -F': ' '/Kernel driver in use/{print $2; exit}' || true)
+  chk_if "Pilote de la carte AMD" '[[ $drv == amdgpu ]]' "${drv:-aucun}" FAIL "${drv:-aucun pilote chargé} (attendu : amdgpu)"
+  [[ $drv == amdgpu ]] || causes+=("La carte n’utilise pas le pilote amdgpu : tout est calculé par le processeur.")
+  local gl; gl=$(LC_ALL=C eglinfo -B 2>/dev/null | grep -m1 'OpenGL renderer' | cut -d: -f2 | xargs || true)
+  if [[ -z $gl ]]; then chk INFO "Rendu OpenGL" "eglinfo indisponible"
+  elif [[ ${gl,,} == *llvmpipe* || ${gl,,} == *softpipe* ]]; then chk FAIL "Rendu OpenGL" "$gl (logiciel !)"; causes+=("Rendu graphique logiciel (llvmpipe) : la carte n’est pas utilisée.")
+  else chk PASS "Rendu OpenGL" "$gl"; fi
+
+  card=$(amd_card_dir || true)
+  # --- Mesures pendant la lecture (5 s)
+  local cpu_before cpu_after
+  cpu_before=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8, $5+$6}' "$SYSROOT/proc/stat" 2>/dev/null || true)
+  for _ in 1 2 3 4 5; do
+    if [[ -n $card ]] && b=$(cat "$card/gpu_busy_percent" 2>/dev/null); then busy=$((busy + b)); n=$((n + 1)); fi
+    sleep "${VIDEO_CHECK_SLEEP:-1}"
+  done
+  cpu_after=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8, $5+$6}' "$SYSROOT/proc/stat" 2>/dev/null || true)
+  local cpu_pct=""
+  if [[ -n $cpu_before && -n $cpu_after ]]; then
+    cpu_pct=$(awk -v a="$cpu_before" -v b="$cpu_after" 'BEGIN{split(a,x," ");split(b,y," ");t=y[1]-x[1];i=y[2]-x[2]; if(t>0) printf "%d", 100*(t-i)/t; else print ""}')
+  fi
+  if [[ -n $cpu_pct ]]; then
+    if ((cpu_pct >= 85)); then chk WARN "Processeur (moyenne 5 s)" "$cpu_pct % — saturé"; causes+=("Processeur saturé ($cpu_pct %) : décodage vidéo logiciel ou programme gourmand (voir la liste).")
+    else chk PASS "Processeur (moyenne 5 s)" "$cpu_pct %"; fi
+  fi
+  if ((n)); then
+    busy=$((busy / n))
+    if ((busy >= 90)); then chk WARN "Carte graphique occupée" "$busy % — saturée"; causes+=("Carte graphique saturée ($busy %) : effets du bureau (flou, transparence), écran(s) en haute résolution/fréquence.")
+    else chk PASS "Carte graphique occupée" "$busy %"; fi
+  fi
+  local top; top=$(ps -eo pcpu=,comm= --sort=-pcpu 2>/dev/null | head -n 5 | awk '{printf "%s %s%%, ", $2, $1}' | sed 's/, $//' || true)
+  chk INFO "Programmes les plus gourmands" "${top:-?}"
+  local qcpu; qcpu=$({ ps -C qs,quickshell -o pcpu= 2>/dev/null || true; } | awk '{s+=$1} END{printf "%d", s}')
+  if [[ -n $qcpu ]] && ((qcpu >= 25)); then chk WARN "Quickshell (barre, widgets)" "$qcpu % du processeur"; causes+=("La barre Quickshell consomme $qcpu % du processeur.")
+  else chk PASS "Quickshell (barre, widgets)" "${qcpu:-0} % du processeur"; fi
+
+  # --- Gestion d'énergie
+  if [[ -n $card ]]; then
+    lvl=$(cat "$card/power_dpm_force_performance_level" 2>/dev/null || true)
+    sclk=$(grep -m1 '\*' "$card/pp_dpm_sclk" 2>/dev/null | awk '{print $2}' || true)
+    mclk=$(grep -m1 '\*' "$card/pp_dpm_mclk" 2>/dev/null | awk '{print $2}' || true)
+    if [[ $lvl == low ]]; then chk WARN "Énergie de la carte" "bloquée en « low » (sclk ${sclk:-?}, mclk ${mclk:-?})"; causes+=("Carte graphique bloquée en mode économie (power_dpm_force_performance_level = low).")
+    else chk PASS "Énergie de la carte" "${lvl:-?} — cœur ${sclk:-?}, mémoire ${mclk:-?}"; fi
+  fi
+  local prof gov
+  prof=$(powerprofilesctl get 2>/dev/null || true)
+  gov=$(cat "$SYSROOT/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor" 2>/dev/null || true)
+  if [[ $prof == power-saver ]]; then chk WARN "Profil d’énergie" "économie d’énergie"; causes+=("Profil « économie d’énergie » actif : processeur bridé.")
+  else chk PASS "Profil d’énergie" "${prof:-non géré} ${gov:+(gouverneur $gov)}"; fi
+
+  # --- Décodage vidéo matériel
+  local va h264=0 vp9=0 av1=0
+  va=$(vainfo --display drm --device /dev/dri/renderD128 2>/dev/null || true)
+  grep -q 'VAProfileH264.*VAEntrypointVLD' <<<"$va" && h264=1
+  grep -q 'VAProfileVP9.*VAEntrypointVLD' <<<"$va" && vp9=1
+  grep -q 'VAProfileAV1.*VAEntrypointVLD' <<<"$va" && av1=1
+  if [[ -z $va ]]; then chk WARN "Décodage vidéo matériel (VA-API)" "vainfo ne répond pas"; causes+=("VA-API indisponible : toute vidéo est décodée par le processeur.")
+  else chk INFO "Décodage vidéo matériel (VA-API)" "H.264 $( ((h264)) && echo oui || echo non) · VP9 $( ((vp9)) && echo oui || echo non) · AV1 $( ((av1)) && echo oui || echo non)"; fi
+
+  # --- Écrans et compositeur
+  if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && command -v hyprctl >/dev/null; then
+    local mj name w h rate scale vrr best
+    mj=$(hyprctl monitors all -j 2>/dev/null || echo '[]')
+    while IFS=$'\t' read -r name w h rate scale vrr best; do
+      [[ -n $name ]] || continue
+      chk INFO "Écran $name" "${w}x${h} à ${rate} Hz, échelle ${scale}, VRR ${vrr}"
+      if awk -v s="$scale" 'BEGIN{exit !(s != int(s))}'; then
+        chk WARN "Écran $name : mise à l’échelle" "$scale (fractionnaire)"; causes+=("Écran $name en échelle $scale : la mise à l’échelle fractionnaire coûte cher à une RX 550 et peut faire saccader les vidéos (mettez 100 % dans Paramètres > Écrans).")
+      fi
+      if awk -v r="$rate" -v b="$best" 'BEGIN{exit !(b - r > 1)}'; then
+        chk WARN "Écran $name : fréquence" "${rate} Hz alors que ${best} Hz est possible"; causes+=("Écran $name à ${rate} Hz au lieu de ${best} Hz (Paramètres > Écrans).")
+      fi
+    done < <(jq -r '.[] | . as $m | [$m.name, $m.width, $m.height, ($m.refreshRate * 100 | round / 100), $m.scale, ($m.vrr // false),
+      ([$m.availableModes[] | select(startswith("\($m.width)x\($m.height)@")) | sub("^.*@"; "") | sub("Hz$"; "") | tonumber] | max // 0)] | @tsv' <<<"$mj" 2>/dev/null || true)
+    local nmon rates; nmon=$(jq 'length' <<<"$mj"); rates=$(jq -r '[.[] | .refreshRate | round] | unique | length' <<<"$mj")
+    if ((nmon > 1 && rates > 1)); then
+      chk WARN "Écrans à fréquences différentes" "$(jq -r '[.[] | "\(.name) \(.refreshRate|round) Hz"] | join(", ")' <<<"$mj")"
+      causes+=("Écrans à fréquences différentes : une vidéo sur l’écran le plus lent, ou déplacée entre écrans, peut saccader. Essayez la même fréquence sur les deux (Paramètres > Écrans).")
+    fi
+    local blur passes anim
+    blur=$(hyprctl -j getoption decoration:blur:enabled 2>/dev/null | jq -r '.int // empty')
+    passes=$(hyprctl -j getoption decoration:blur:passes 2>/dev/null | jq -r '.int // empty')
+    anim=$(hyprctl -j getoption animations:enabled 2>/dev/null | jq -r '.int // empty')
+    chk INFO "Effets du bureau" "flou $([[ $blur == 1 ]] && echo "activé (${passes:-?} passes)" || echo désactivé), animations $([[ $anim == 1 ]] && echo activées || echo désactivées)"
+    chk INFO "Hyprland" "$(hyprctl version -j 2>/dev/null | jq -r '.tag // .version // "?"')"
+  else
+    chk WARN "Écrans et compositeur" "non mesurés : lancez ce diagnostic depuis la session Hyprland"
+  fi
+  local mem; mem=$(awk '/MemAvailable/{printf "%d", $2/1024}' "$SYSROOT/proc/meminfo" 2>/dev/null || true)
+  if [[ -n $mem ]] && ((mem < 1024)); then chk WARN "Mémoire disponible" "$mem Mo"; causes+=("Mémoire presque pleine ($mem Mo libres).")
+  elif [[ -n $mem ]]; then chk PASS "Mémoire disponible" "$mem Mo"; fi
+  chk INFO "Versions" "noyau $(uname -r), $(pacman -Q mesa 2>/dev/null || echo 'mesa ?')"
+
+  ui ""
+  if ((${#causes[@]})); then
+    ui "  ${C_B}Causes probables :${C_RST}"
+    local c; for c in "${causes[@]}"; do ui "   • $c"; done
+  else
+    ui "  ${C_B}Aucune cause évidente mesurée.${C_RST} Si ça saccade quand même, prenez cet écran en photo."
+  fi
+}
+
+# =============================================================================
 # 17 ter. MODE --monitors (Super+F2) : résolution et fréquence de chaque écran
 # =============================================================================
 # Menu fuzzel (ou terminal) ; le choix est écrit dans ~/.config/hypr/monitors.lua
@@ -4036,6 +4168,7 @@ Usage : ./install.sh [options]
                        Ex. : ./install.sh --dotfiles https://github.com/user/dots#branche
   --dotfiles-restore   Annule le dernier --dotfiles (restaure la configuration précédente)
   --monitors           Choisir résolution et fréquence de chaque écran (aussi : Super+F2)
+  --video-check        Diagnostic des saccades (vidéo, écrans, carte, processeur) — lecture seule
   -h, --help           Cette aide     --version   Version
 
 Journaux, sauvegardes, rapports : ~/.local/share/hypr-installer/
@@ -4051,6 +4184,7 @@ parse_args() {
       --repair) MODE=repair; FORCE=1 ;;
       --post-login-check) MODE=post-login-check ;;
       --monitors) MODE=monitors ;;
+      --video-check) MODE=video-check ;;
       --session-debug) MODE=session-debug ;;
       --first-login) MODE=first-login ;;
       --allow-non-eos) ALLOW_NON_EOS=1 ;;
@@ -4083,6 +4217,12 @@ main() {
     LOG_FILE="$LOG_DIR/session-debug-$RUN_TS.log"
     exec 3>&1 4>&2 5>>"$LOG_FILE"; exec >>"$LOG_FILE" 2>&1
     session_debug
+    exit 0
+  fi
+  if [[ $MODE == video-check ]]; then
+    LOG_FILE="$LOG_DIR/video-check-$RUN_TS.log"
+    exec 3>&1 4>&2 5>>"$LOG_FILE"; exec >>"$LOG_FILE" 2>&1
+    video_check; ui ""; ui "  Rapport : $(write_report "Diagnostic vidéo et fluidité")"
     exit 0
   fi
   if [[ $MODE == monitors ]]; then

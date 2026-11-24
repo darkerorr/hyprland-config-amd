@@ -739,6 +739,41 @@ RUN_ENV=()
 run_installer --monitors
 check "S18 hors session : refus clair" bash -c "[[ $RC -ne 0 ]] && grep -q 'Super+F2' '$OUT'"
 
+# =============================================================================
+# S19. --video-check : diagnostic en lecture seule, causes probables
+# =============================================================================
+reset_all
+run_installer --yes
+card="$SR/sys/class/drm/card1/device"; mkdir -p "$card" "$SR/proc"
+echo 0x1002 >"$card/vendor"; echo 97 >"$card/gpu_busy_percent"; echo auto >"$card/power_dpm_force_performance_level"
+printf '0: 214Mhz\n1: 1183Mhz *\n' >"$card/pp_dpm_sclk"; printf '0: 300Mhz\n1: 1750Mhz *\n' >"$card/pp_dpm_mclk"
+printf 'cpu  100 0 100 800 0 0 0 0 0 0\n' >"$SR/proc/stat"; printf 'MemAvailable: 6000000 kB\n' >"$SR/proc/meminfo"
+cat >"$MOCK/monitors.json" <<'EOJ'
+[{"name":"DP-1","description":"BenQ","width":1920,"height":1080,"refreshRate":59.95,"scale":1.25,"vrr":false,
+  "availableModes":["1920x1080@143.98Hz","1920x1080@60.00Hz"]},
+ {"name":"HDMI-A-1","description":"Samsung","width":1920,"height":1080,"refreshRate":75.0,"scale":1.0,"vrr":false,
+  "availableModes":["1920x1080@75.00Hz","1920x1080@60.00Hz"]}]
+EOJ
+mock eglinfo 'echo "OpenGL renderer string: AMD Radeon RX 550 Series (radeonsi, polaris12, LLVM 20.1.0, DRM 3.61)"'
+mock powerprofilesctl 'echo power-saver'
+cp "$BIN/vainfo" "$MOCK/vainfo.orig"
+mock vainfo 'printf "%s\n" "vainfo: Driver version: Mesa Gallium driver" "      VAProfileH264High               :	VAEntrypointVLD" "      VAProfileHEVCMain               :	VAEntrypointVLD"'
+: >"$MOCK/calls.log"
+RUN_ENV=(HYPRLAND_INSTANCE_SIGNATURE=test WAYLAND_DISPLAY=wayland-1 VIDEO_CHECK_SLEEP=0)
+run_installer --yes --video-check
+RUN_ENV=()
+check "S19 diagnostic : code 0, rapport écrit" bash -c "[[ $RC -eq 0 ]] && grep -q 'Rapport :' '$OUT'"
+check "S19 pilote amdgpu et rendu matériel reconnus" bash -c "grep -q 'Pilote de la carte AMD.*amdgpu' '$OUT' && grep -q 'Rendu OpenGL.*radeonsi' '$OUT'"
+check "S19 VA-API : H.264 oui, VP9 non" grep -q 'H.264 oui · VP9 non · AV1 non' "$OUT"
+check "S19 causes : carte saturée, échelle 1.25, 60 Hz au lieu de 144, fréquences différentes, économie d'énergie" bash -c "grep -q 'Carte graphique saturée (97 %)' '$OUT' && grep -q 'échelle 1.25' '$OUT' && grep -q '59.95 Hz au lieu de 143.98 Hz' '$OUT' && grep -q 'fréquences différentes' '$OUT' && grep -q 'économie d’énergie' '$OUT'"
+check "S19 lecture seule : aucune commande d'écriture" bash -c "! grep -qE '^(sudo|pacman -S|pacman -U|hyprctl reload|systemctl enable)' '$MOCK/calls.log'"
+mock eglinfo 'echo "OpenGL renderer string: llvmpipe (LLVM 20.1.0, 256 bits)"'
+RUN_ENV=(VIDEO_CHECK_SLEEP=0)
+run_installer --yes --video-check
+RUN_ENV=()
+check "S19 rendu logiciel détecté ; hors session signalé" bash -c "grep -q 'Rendu graphique logiciel (llvmpipe)' '$OUT' && grep -q 'lancez ce diagnostic depuis la session Hyprland' '$OUT'"
+cp "$MOCK/vainfo.orig" "$BIN/vainfo"; rm -f "$BIN/eglinfo" "$BIN/powerprofilesctl" "$card/gpu_busy_percent"
+
 echo
 echo "Résultat : $PASS réussis, $FAILN échoués"
 ((FAILN == 0))
