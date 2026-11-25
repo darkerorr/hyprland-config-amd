@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="3.5.0"
+readonly INSTALLER_VERSION="3.6.0"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
 readonly CHECKPOINT_SCHEMA=4
 readonly MAIN_PID=$$
@@ -219,6 +219,7 @@ readonly USER_UNIT_DIR="$SYSROOT/usr/lib/systemd/user"
 readonly WALLPAPER_DIR="$SYSROOT/usr/share/backgrounds/archlinux"
 readonly DEFAULT_WALLPAPER="$WALLPAPER_DIR/mountain.jpg"
 readonly VCONSOLE_CONF="$SYSROOT/etc/vconsole.conf"
+readonly MODPROBE_AUDIO="$SYSROOT/etc/modprobe.d/hypr-installer-audio.conf"
 readonly FIREFOX_POLICY="$SYSROOT/etc/firefox/policies/policies.json"
 readonly BRAVE_POLICY="$SYSROOT/etc/brave/policies/managed/hypr-installer-video.json"
 readonly X11_KEYBOARD_CONF="$SYSROOT/etc/X11/xorg.conf.d/00-keyboard.conf"
@@ -2825,6 +2826,57 @@ configure_audio() {
   pac_install "${AUDIO_PKGS[@]}"
   sudo systemctl --global enable pipewire.socket pipewire-pulse.socket wireplumber.service
   ok "PipeWire + WirePlumber + pipewire-pulse activés pour les sessions utilisateur"
+  configure_audio_anticrackle
+}
+
+# Son qui grésille / craque : réglages PipeWire classiques pour une carte son
+# intégrée (Realtek via snd_hda_intel) — tampons plus grands (latence ~21 ms,
+# imperceptible hors production musicale), pas de mise en veille de la carte
+# son entre deux sons (« clics »), 44,1 et 48 kHz sans rééchantillonnage.
+# Pour annuler : supprimer les fichiers 90-hypr-installer-audio.conf.
+configure_audio_anticrackle() {
+  write_managed "$CFG/pipewire/pipewire.conf.d/90-hypr-installer-audio.conf" <<EOF
+$MANAGED_MARK — anti-grésillements (supprimer ce fichier pour annuler)
+context.properties = {
+    default.clock.rate          = 48000
+    default.clock.allowed-rates = [ 44100 48000 ]
+    default.clock.quantum       = 1024
+    default.clock.min-quantum   = 1024
+}
+EOF
+  write_managed "$CFG/pipewire/pipewire-pulse.conf.d/90-hypr-installer-audio.conf" <<EOF
+$MANAGED_MARK — anti-grésillements (navigateurs, Discord…)
+pulse.properties = {
+    pulse.min.req     = 1024/48000
+    pulse.min.frag    = 1024/48000
+    pulse.min.quantum = 1024/48000
+}
+EOF
+  write_managed "$CFG/wireplumber/wireplumber.conf.d/90-hypr-installer-audio.conf" <<EOF
+$MANAGED_MARK — carte son jamais mise en veille, marge de tampon
+monitor.alsa.rules = [
+  {
+    matches = [ { node.name = "~alsa_output.*" }, { node.name = "~alsa_input.*" } ]
+    actions = {
+      update-props = {
+        session.suspend-timeout-seconds = 0
+        api.alsa.headroom = 1024
+      }
+    }
+  }
+]
+EOF
+  sudo_write "$MODPROBE_AUDIO" 644 <<EOF
+$MANAGED_MARK — pas de mise en veille de la carte son intégrée (claquements)
+options snd_hda_intel power_save=0 power_save_controller=N
+EOF
+  local ps="$SYSROOT/sys/module/snd_hda_intel/parameters/power_save"
+  [[ -w $ps || -e $ps ]] && { echo 0 | sudo tee "$ps" >/dev/null 2>&1 || true; }
+  if systemctl --user is-active --quiet pipewire.service 2>/dev/null; then
+    systemctl --user restart pipewire.service pipewire-pulse.service wireplumber.service 2>/dev/null \
+      || warn "PipeWire non redémarré : les réglages audio s’appliqueront à la prochaine connexion."
+  fi
+  ok "Son : réglages anti-grésillements (tampons, veille de la carte son désactivée)"
 }
 
 configure_network() {
@@ -2992,6 +3044,7 @@ verify_step_10() {
 
 verify_step_11() {
   verify_pkgs "${AUDIO_PKGS[@]}" "${NET_PKGS[@]}" "${BT_PKGS[@]}"
+  [[ -f $CFG/wireplumber/wireplumber.conf.d/90-hypr-installer-audio.conf && -f $MODPROBE_AUDIO ]] || vp "réglages audio anti-grésillements absents"
   local dm
   dm=$(basename "$(readlink -f "$DM_LINK" 2>/dev/null || true)" .service)
   [[ -n $dm && $dm != display-manager ]] || vp "aucun gestionnaire de connexion activé"
