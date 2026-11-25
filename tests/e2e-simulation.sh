@@ -239,6 +239,11 @@ if [[ $1 == clone ]]; then
       n=$(basename "$url" .git); v=$(<"$MOCK/pinver.$n")
       printf "pkgname=%s\npkgver=%s\npkgrel=%s\narch=(x86_64)\n" "$n" "${v%-*}" "${v##*-}" >"$dir/PKGBUILD" ;;
     *google-sans-flex*) echo font >"$dir/GoogleSansFlex.ttf" ;;
+    *sddm-astronaut-theme*)
+      mkdir -p "$dir/Themes" "$dir/Backgrounds" "$dir/Fonts" "$dir/Previews"
+      echo "import QtQuick" >"$dir/Main.qml"; echo png >"$dir/Backgrounds/astronaut.png"; echo ttf >"$dir/Fonts/Orbitron.ttf"; echo p >"$dir/Previews/a.png"
+      printf "%s\n" "[General]" "HourFormat=\"HH:mm\"" "HeaderText=\"\"" "Background=\"Backgrounds/astronaut.png\"" "DimBackground=\"0.0\"" >"$dir/Themes/astronaut.conf"
+      printf "%s\n" "[SddmGreeterTheme]" "Name=sddm-astronaut-theme" "ConfigFile=Themes/astronaut.conf" "MainScript=Main.qml" "QtVersion=6" >"$dir/metadata.desktop" ;;
     *anthropics/skills*)
       for k in pdf docx skill-creator; do mkdir -p "$dir/skills/$k"; printf -- "---\nname: %s\n---\n" "$k" >"$dir/skills/$k/SKILL.md"; done
       mkdir -p "$dir/template"; echo x >"$dir/template/SKILL.md" ;;
@@ -420,6 +425,9 @@ check "S1 skills IA installées (3) avec marqueur, modèle exclu" bash -c "for k
 check "S1 ~/.local/bin dans le PATH (environment.d, bash, fish)" bash -c "[[ -f '$H/.config/environment.d/90-hypr-installer-path.conf' && -f '$H/.config/fish/conf.d/hypr-installer-path.fish' ]] && grep -q 'hypr-installer: ~/.local/bin' '$H/.bashrc'"
 check "S1 docker.socket activé, groupe docker ajouté" bash -c "grep -q 'gpasswd -a' '$MOCK/calls.log'"
 check "S1 point de reprise 12 écrit" test -f "$STATE/step-12.done"
+T_THEME="$SR/usr/share/sddm/themes/hypr-installer-astronaut"
+check "S1 écran de connexion : thème installé et sélectionné" bash -c "[[ -f '$T_THEME/Main.qml' && ! -e '$T_THEME/Previews' && ! -e '$T_THEME/.git' && -f '$SR/usr/share/fonts/hypr-installer-astronaut/Orbitron.ttf' ]] && grep -q '^Current=hypr-installer-astronaut' '$SR/etc/sddm.conf.d/zz-hypr-installer-theme.conf' && grep -q '^ConfigFile=Themes/hypr-installer.conf' '$T_THEME/metadata.desktop'"
+check "S1 écran de connexion : votre fond d'écran, « Bienvenue »" bash -c "grep -q '^Background=\"Backgrounds/hypr-installer\.' '$T_THEME/Themes/hypr-installer.conf' && ls '$T_THEME'/Backgrounds/hypr-installer.* >/dev/null && grep -q 'HeaderText=\"Bienvenue\"' '$T_THEME/Themes/hypr-installer.conf'"
 check "S1 son : réglages anti-grésillements (PipeWire, pulse, WirePlumber, snd_hda_intel)" bash -c "grep -q 'min-quantum   = 1024' '$H/.config/pipewire/pipewire.conf.d/90-hypr-installer-audio.conf' && grep -q 'pulse.min.quantum' '$H/.config/pipewire/pipewire-pulse.conf.d/90-hypr-installer-audio.conf' && grep -q 'session.suspend-timeout-seconds = 0' '$H/.config/wireplumber/wireplumber.conf.d/90-hypr-installer-audio.conf' && grep -q 'power_save=0' '$SR/etc/modprobe.d/hypr-installer-audio.conf'"
 check "S1 application Paramètres installée (Super+I) + entrée du menu" bash -c "[[ -x '$H/.local/share/hypr-installer/bin/hypr-parametres' && -f '$H/.local/share/applications/hypr-parametres.desktop' ]] && python3 -m py_compile '$H/.local/share/hypr-installer/bin/hypr-parametres' && [[ -f '$MOCK/db/gnome-control-center' && -f '$MOCK/db/libadwaita' ]]"
 check "S1 Super+I -> Paramètres (raccourci end-4 remplacé), réglages chargés" bash -c "grep -q 'hl.unbind(\"SUPER + I\")' '$H/.config/hypr/custom/keybinds.lua' && grep -q 'bin/hypr-parametres\")' '$H/.config/hypr/custom/keybinds.lua' && grep -q 'pcall(require, \"hypr-parametres\")' '$H/.config/hypr/custom/general.lua'"
@@ -774,6 +782,32 @@ run_installer --yes --video-check
 RUN_ENV=()
 check "S19 rendu logiciel détecté ; hors session signalé" bash -c "grep -q 'Rendu graphique logiciel (llvmpipe)' '$OUT' && grep -q 'lancez ce diagnostic depuis la session Hyprland' '$OUT'"
 cp "$MOCK/vainfo.orig" "$BIN/vainfo"; rm -f "$BIN/eglinfo" "$BIN/powerprofilesctl" "$card/gpu_busy_percent"
+
+# =============================================================================
+# S20. Écran de connexion : /etc/sddm.conf prioritaire, autre gestionnaire, annulation
+# =============================================================================
+reset_all
+printf '[Theme]\nCurrent=breeze\n' >"$SR/etc/sddm.conf"
+run_installer --yes
+check "S20 /etc/sddm.conf (prioritaire) pointe vers le nouveau thème, sauvegardé" bash -c "[[ $RC -eq 0 ]] && grep -qx 'Current=hypr-installer-astronaut' '$SR/etc/sddm.conf'"
+run_installer --yes --login-restore
+check "S20 --login-restore : thème retiré, /etc/sddm.conf sans Current imposé" bash -c "[[ $RC -eq 0 && ! -e '$SR/etc/sddm.conf.d/zz-hypr-installer-theme.conf' ]] && ! grep -q 'hypr-installer-astronaut' '$SR/etc/sddm.conf'"
+: >"$MOCK/calls.log"
+run_installer --yes
+check "S20 après annulation : relance sans réimposer le thème" bash -c "[[ $RC -eq 0 && ! -e '$SR/etc/sddm.conf.d/zz-hypr-installer-theme.conf' ]]"
+rm -f "$STATE/login.declined"
+run_installer --yes
+check "S20 thème remis à la demande (choix effacé)" bash -c "[[ $RC -eq 0 && -f '$SR/etc/sddm.conf.d/zz-hypr-installer-theme.conf' ]]"
+reset_all
+rm -f "$SR/etc/systemd/system/display-manager.service"
+ln -s "$SR/usr/lib/systemd/system/lightdm.service" "$SR/etc/systemd/system/display-manager.service"
+: >"$SR/usr/lib/systemd/system/lightdm.service"
+run_installer --yes
+check "S20 LightDM -> SDDM (proposé, mémorisé) + thème" bash -c "[[ $RC -eq 0 ]] && grep -q 'systemctl enable --force sddm.service' '$MOCK/calls.log' && [[ \$(cat '$STATE/login.previous-dm') == lightdm && -f '$SR/etc/sddm.conf.d/zz-hypr-installer-theme.conf' ]]"
+run_installer --yes --login-restore
+check "S20 --login-restore : LightDM réactivé" bash -c "[[ $RC -eq 0 ]] && grep -q 'systemctl enable --force lightdm.service' '$MOCK/calls.log'"
+rm -f "$SR/etc/systemd/system/display-manager.service" "$SR/etc/sddm.conf"
+ln -s "$SR/usr/lib/systemd/system/sddm.service" "$SR/etc/systemd/system/display-manager.service"
 
 echo
 echo "Résultat : $PASS réussis, $FAILN échoués"

@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit nullglob
 
-readonly INSTALLER_VERSION="3.6.0"
+readonly INSTALLER_VERSION="3.7.0"
 # Schéma des points de reprise : à incrémenter si la signification d'une étape change.
 readonly CHECKPOINT_SCHEMA=4
 readonly MAIN_PID=$$
@@ -219,6 +219,16 @@ readonly USER_UNIT_DIR="$SYSROOT/usr/lib/systemd/user"
 readonly WALLPAPER_DIR="$SYSROOT/usr/share/backgrounds/archlinux"
 readonly DEFAULT_WALLPAPER="$WALLPAPER_DIR/mountain.jpg"
 readonly VCONSOLE_CONF="$SYSROOT/etc/vconsole.conf"
+# Écran de connexion : thème SDDM « astronaut » (Keyitdev, GPL-3.0), commit épinglé,
+# avec votre fond d'écran. Fichiers système : thème, polices, un fichier sddm.conf.d.
+readonly LOGIN_THEME_REPO="https://github.com/Keyitdev/sddm-astronaut-theme.git"
+readonly LOGIN_THEME_COMMIT="abb3163c724935af888ba5ea9ac0c4f22afd8048"   # 2026-09-18
+readonly LOGIN_THEME_NAME="hypr-installer-astronaut"
+readonly LOGIN_THEME_DIR="$SYSROOT/usr/share/sddm/themes/$LOGIN_THEME_NAME"
+readonly LOGIN_FONTS_DIR="$SYSROOT/usr/share/fonts/$LOGIN_THEME_NAME"
+readonly SDDM_THEME_CONF="$SYSROOT/etc/sddm.conf.d/zz-hypr-installer-theme.conf"
+readonly SDDM_MAIN_CONF="$SYSROOT/etc/sddm.conf"
+readonly -a LOGIN_THEME_PKGS=(sddm qt6-svg qt6-virtualkeyboard qt6-multimedia-ffmpeg)
 readonly MODPROBE_AUDIO="$SYSROOT/etc/modprobe.d/hypr-installer-audio.conf"
 readonly FIREFOX_POLICY="$SYSROOT/etc/firefox/policies/policies.json"
 readonly BRAVE_POLICY="$SYSROOT/etc/brave/policies/managed/hypr-installer-video.json"
@@ -658,7 +668,7 @@ start_sudo_keepalive() {
 # Sinon sudo demanderait le mot de passe pendant que l'indicateur d'activité
 # l'efface de l'écran : invite invisible, puis « sudo: timed out reading password ».
 ensure_sudo() {
-  [[ $MODE == install || $MODE == repair || $MODE == dotfiles ]] || return 0
+  [[ $MODE == install || $MODE == repair || $MODE == dotfiles || $MODE == login-restore ]] || return 0
   sudo -n true 2>/dev/null && return 0
   printf '\n  %sAuthentification administrateur (sudo) requise :%s\n' "$C_YEL" "$C_RST" >&3
   local i
@@ -2957,7 +2967,80 @@ configure_login_manager() {
   return 0
 }
 
-configure_all_services() { configure_audio; configure_network; configure_bluetooth; configure_services; configure_login_manager; }
+configure_all_services() { configure_audio; configure_network; configure_bluetooth; configure_services; configure_login_manager; configure_login_theme; }
+
+# Bel écran de connexion. Seul SDDM sait afficher ce thème : si un autre
+# gestionnaire est actif (LightDM, GDM…), on propose de passer à SDDM ; l'ancien
+# est mémorisé et ./install.sh --login-restore le remet.
+configure_login_theme() {
+  if [[ $CURRENT_DM != sddm ]]; then
+    if [[ $(state_get login.declined) == 1 ]]; then info "Écran de connexion : $CURRENT_DM conservé (choix mémorisé)"; return 0; fi
+    if ! ask_yes_no "L’écran de connexion actuel ($CURRENT_DM) ne peut pas recevoir le nouveau thème. Passer à SDDM (réversible : ./install.sh --login-restore) ?"; then
+      state_set login.declined 1; info "Écran de connexion : $CURRENT_DM conservé"; return 0
+    fi
+    local old=$CURRENT_DM
+    pac_install sddm
+    state_set login.previous-dm "$old"
+    sudo systemctl enable --force sddm.service
+    CURRENT_DM=sddm
+    configure_login_manager
+    ok "SDDM remplace $old au prochain démarrage"
+  fi
+  pac_install "${LOGIN_THEME_PKGS[@]}"
+  local src="$BUILD_DIR/sddm-astronaut-theme" wp cfgjson="$CFG/illogical-impulse/config.json" bg="Backgrounds/astronaut.png" ext
+  git_checkout_pinned "$LOGIN_THEME_REPO" "$src" "$LOGIN_THEME_COMMIT"
+  [[ -f $src/Main.qml && -f $src/Themes/astronaut.conf ]] || die "Thème de connexion incomplet ($src)."
+  sudo mkdir -p "$LOGIN_THEME_DIR" "$LOGIN_FONTS_DIR"
+  sudo rsync -a --delete --exclude .git --exclude Previews --exclude setup.sh --exclude Fonts "$src/" "$LOGIN_THEME_DIR/"
+  sudo rsync -a --delete "$src/Fonts/" "$LOGIN_FONTS_DIR/"
+  # Votre fond d'écran actuel (copié : SDDM ne peut pas lire votre dossier personnel).
+  wp=$(jq -r '.background.wallpaperPath // ""' "$cfgjson" 2>/dev/null || true)
+  [[ -f $wp ]] || wp=$(state_get default-wallpaper)
+  [[ -f $wp ]] || wp=$DEFAULT_WALLPAPER
+  if [[ -f $wp ]]; then
+    ext=${wp##*.}; ext=${ext,,}
+    case $ext in png|jpg|jpeg|webp|gif) sudo install -m 644 "$wp" "$LOGIN_THEME_DIR/Backgrounds/hypr-installer.$ext"; bg="Backgrounds/hypr-installer.$ext" ;; esac
+  fi
+  sed -e "s|^Background=.*|Background=\"$bg\"|" \
+      -e 's|^DimBackground=.*|DimBackground="0.25"|' \
+      -e 's|^HeaderText=.*|HeaderText="Bienvenue"|' \
+      -e 's|^HourFormat=.*|HourFormat="HH:mm"|' \
+      "$src/Themes/astronaut.conf" | sudo_write "$LOGIN_THEME_DIR/Themes/hypr-installer.conf" 644
+  sed -e 's|^ConfigFile=.*|ConfigFile=Themes/hypr-installer.conf|' "$src/metadata.desktop" | sudo_write "$LOGIN_THEME_DIR/metadata.desktop" 644
+  sudo_write "$SDDM_THEME_CONF" 644 <<EOF
+$MANAGED_MARK — écran de connexion (./install.sh --login-restore pour annuler)
+[Theme]
+Current=$LOGIN_THEME_NAME
+
+[General]
+InputMethod=qtvirtualkeyboard
+EOF
+  # /etc/sddm.conf est lu en dernier : un « Current= » qui s'y trouve l'emporterait.
+  if sudo test -f "$SDDM_MAIN_CONF" && sudo grep -qE '^[[:space:]]*Current[[:space:]]*=' "$SDDM_MAIN_CONF" \
+     && ! sudo grep -qE "^[[:space:]]*Current[[:space:]]*=[[:space:]]*${LOGIN_THEME_NAME}[[:space:]]*$" "$SDDM_MAIN_CONF"; then
+    sudo cat "$SDDM_MAIN_CONF" | sed -E "s|^([[:space:]]*)Current[[:space:]]*=.*|\1Current=$LOGIN_THEME_NAME|" | sudo_write "$SDDM_MAIN_CONF" 644
+  fi
+  sudo fc-cache -f "$LOGIN_FONTS_DIR" >/dev/null 2>&1 || true
+  state_set login.theme "$LOGIN_THEME_COMMIT"
+  ok "Écran de connexion : thème « astronaut » avec votre fond d’écran (visible au prochain démarrage)"
+}
+
+restore_login() {
+  ensure_sudo
+  local prev; prev=$(state_get login.previous-dm)
+  sudo rm -f -- "$SDDM_THEME_CONF"
+  if sudo grep -qE "^[[:space:]]*Current[[:space:]]*=[[:space:]]*$LOGIN_THEME_NAME" "$SDDM_MAIN_CONF" 2>/dev/null; then
+    sudo cat "$SDDM_MAIN_CONF" | sed -E "/^[[:space:]]*Current[[:space:]]*=[[:space:]]*$LOGIN_THEME_NAME/d" | sudo_write "$SDDM_MAIN_CONF" 644
+  fi
+  if [[ -n $prev && $prev != sddm ]]; then
+    sudo systemctl enable --force "$prev.service" && ok "Écran de connexion d’origine ($prev) réactivé"
+    rm -f -- "$STATE_DIR/login.previous-dm"
+  fi
+  state_set login.declined 1
+  rm -f -- "$STATE_DIR/login.theme"
+  ok "Ancien écran de connexion remis (visible au prochain démarrage)."
+  ui "  Pour remettre le thème plus tard : rm ${STATE_DIR/#$HOME/\~}/login.declined puis ./install.sh"
+}
 
 # =============================================================================
 # 15 bis. ÉTAT RÉEL DE CHAQUE ÉTAPE (lecture seule)
@@ -3045,6 +3128,9 @@ verify_step_10() {
 verify_step_11() {
   verify_pkgs "${AUDIO_PKGS[@]}" "${NET_PKGS[@]}" "${BT_PKGS[@]}"
   [[ -f $CFG/wireplumber/wireplumber.conf.d/90-hypr-installer-audio.conf && -f $MODPROBE_AUDIO ]] || vp "réglages audio anti-grésillements absents"
+  if [[ $(state_get login.declined) != 1 ]]; then
+    [[ $(state_get login.theme) == "$LOGIN_THEME_COMMIT" && -f $LOGIN_THEME_DIR/Main.qml && -f $SDDM_THEME_CONF ]] || vp "thème de l’écran de connexion absent"
+  fi
   local dm
   dm=$(basename "$(readlink -f "$DM_LINK" 2>/dev/null || true)" .service)
   [[ -n $dm && $dm != display-manager ]] || vp "aucun gestionnaire de connexion activé"
@@ -4222,6 +4308,7 @@ Usage : ./install.sh [options]
   --dotfiles-restore   Annule le dernier --dotfiles (restaure la configuration précédente)
   --monitors           Choisir résolution et fréquence de chaque écran (aussi : Super+F2)
   --video-check        Diagnostic des saccades (vidéo, écrans, carte, processeur) — lecture seule
+  --login-restore      Remet l’écran de connexion d’origine (annule le thème « astronaut »)
   -h, --help           Cette aide     --version   Version
 
 Journaux, sauvegardes, rapports : ~/.local/share/hypr-installer/
@@ -4238,6 +4325,7 @@ parse_args() {
       --post-login-check) MODE=post-login-check ;;
       --monitors) MODE=monitors ;;
       --video-check) MODE=video-check ;;
+      --login-restore) MODE=login-restore ;;
       --session-debug) MODE=session-debug ;;
       --first-login) MODE=first-login ;;
       --allow-non-eos) ALLOW_NON_EOS=1 ;;
@@ -4270,6 +4358,12 @@ main() {
     LOG_FILE="$LOG_DIR/session-debug-$RUN_TS.log"
     exec 3>&1 4>&2 5>>"$LOG_FILE"; exec >>"$LOG_FILE" 2>&1
     session_debug
+    exit 0
+  fi
+  if [[ $MODE == login-restore ]]; then
+    LOG_FILE="$LOG_DIR/login-restore-$RUN_TS.log"
+    exec 3>&1 4>&2 5>>"$LOG_FILE"; exec >>"$LOG_FILE" 2>&1
+    restore_login
     exit 0
   fi
   if [[ $MODE == video-check ]]; then
